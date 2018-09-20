@@ -14,15 +14,23 @@
 
 namespace osv {
 
+/* 工作原理是什么?
+   猜测: 1. 进行demangle; 2. 使用回调函数在外部分配的空间上拷贝名称 
+ */
 extern "C" int __gcclibcxx_demangle_callback (const char *,
     void (*)(const char *, size_t, void *),
     void *);
 
+/* buf - 空闲区间的起点
+   len - 空闲空间的大小 
+ */
 struct demangle_callback_arg {
     char *buf;
     size_t len;
 };
 
+/* 将名称尽可能完整地拷贝到arg->buf,并更新arg
+ */
 static void demangle_callback(const char *buf, size_t len, void *opaque)
 {
     struct demangle_callback_arg *arg =
@@ -42,8 +50,12 @@ bool demangle(const char *name, char *buf, size_t len)
     return (ret == 0);
 }
 
+/* 返回符号名和相对位置
+ */
 void lookup_name_demangled(void *addr, char *buf, size_t len)
 {
+    /* 在当前program(app)指定的地址出搜索
+     */
     auto ei = elf::get_program()->lookup_addr(addr);
     int funclen;
 
@@ -67,6 +79,8 @@ std::unique_ptr<char> demangle(const char *name)
     return std::unique_ptr<char>(demangled);
 }
 
+/* 多次调用运算符`()`时可以重用内存来保存符号名
+ */
 demangler::~demangler()
 {
     free(_buf);

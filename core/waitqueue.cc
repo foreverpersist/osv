@@ -15,6 +15,8 @@ TRACEPOINT(trace_waitqueue_wake_all, "%p", waitqueue *);
 
 namespace sched {
 
+/* 将关联创建时线程的wait_record加入等待队列
+ */
 void wait_object<waitqueue>::arm()
 {
     auto& fifo = _wq._waiters_fifo;
@@ -26,6 +28,8 @@ void wait_object<waitqueue>::arm()
     fifo.newest = &_wr;
 }
 
+/* 若关联创建时线程的wait_record未被唤醒则从等待队列移除
+ */
 void wait_object<waitqueue>::disarm()
 {
     auto& fifo = _wq._waiters_fifo;
@@ -56,6 +60,9 @@ void waitqueue::wait(mutex& mtx)
     sched::thread::wait_for(mtx, *this);
 }
 
+/* 并未真正意义上立即唤醒,仅是通知关联的线程在等待到互斥锁后自己唤醒
+   wait_all同理
+ */
 void waitqueue::wake_one(mutex& mtx)
 {
     trace_waitqueue_wake_one(this);
@@ -67,7 +74,7 @@ void waitqueue::wake_one(mutex& mtx)
         }
         // Rather than wake the waiter here (wr->wake()) and have it wait
         // again for the mutex, we do "wait morphing" - have it continue to
-        // sleep until the mutex becomes available.
+        // 
         wr->wake_lock(&mtx);
     }
 }

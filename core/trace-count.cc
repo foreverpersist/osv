@@ -7,6 +7,8 @@
 
 #include <osv/trace-count.hh>
 
+/* tracepoint_base可以绑定多个tracepont_counter
+ */
 tracepoint_counter::tracepoint_counter(tracepoint_base& tp)
     : _tp(tp)
 {

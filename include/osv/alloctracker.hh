@@ -66,7 +66,7 @@ private:
         int next;
     };
 
-    // Indexes of the first free node, and the most recently used mode.
+    // Indexes of the first free node, and the most recently used node.
     // Each is the head of a list, using the "next" pointer and ending in -1.
     int first_free;
     int newest_allocation;

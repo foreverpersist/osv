@@ -28,6 +28,8 @@
 
 namespace lockfree { struct mutex; }
 
+/* 仅持有一个thread*,并无实质内容
+ */
 class waiter {
 protected:
     sched::thread *t;
@@ -85,6 +87,8 @@ public:
 // (doing that, a technique called "wait morphing", is intended to reduce
 // unnecessary thread wakes).
 
+/* 持有一个thread*以及自身类型的next指针(用于构建链表)
+ */
 struct wait_record : public waiter {
     struct wait_record *next;
     explicit wait_record(sched::thread *t) : waiter(t), next(nullptr) { };

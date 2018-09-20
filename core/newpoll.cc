@@ -73,6 +73,8 @@ void poller::wait()
     });
 }
 
+/* 检查能否执行on_wake回调,回调时允许执行del
+ */
 void poller::process()
 {
     // Iterate over the items using a technique that is ugly, but allows the

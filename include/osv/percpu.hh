@@ -44,6 +44,8 @@ public:
         return addr(cpu->percpu_base);
     }
 private:
+    /* 利用属性的地址而非值作为offset
+     */
     T *addr(char* base = percpu_base) {
         size_t offset = reinterpret_cast<size_t>(&_var);
         return reinterpret_cast<T*>(base + offset);
@@ -53,6 +55,8 @@ private:
     friend size_t dynamic_percpu_base();
 };
 
+/* 此类型变量会自动在每个CPU存在一个单独的副本,一般用作OS全局属性
+ */
 #define PERCPU(type, var) __attribute__((section(".percpu"))) \
             percpu<type> var (percpu<type>::please_use_PERCPU_macro)
 

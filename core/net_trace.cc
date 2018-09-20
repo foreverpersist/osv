@@ -17,6 +17,9 @@ private:
 private:
     void ensure_next()
     {
+        /* ++和+=运算保证_pos是缓慢增加的,不会跳跃多个mbuf
+           在_pos到达当前边界时,_m向后移动
+         */
         while (_m != nullptr && _pos == (size_t) _m->m_hdr.mh_len) {
             _m = _m->m_hdr.mh_next;
             _pos = 0;
@@ -78,6 +81,8 @@ public:
 
 namespace std {
 
+/* distance是相对于整个mbuf链而言的,first和second之间可能相隔若干个mbuf
+ */
 template<>
 size_t distance<mbuf_iterator>(mbuf_iterator first, mbuf_iterator second)
 {

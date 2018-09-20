@@ -61,4 +61,6 @@ mmioaddr_t mmio_map(u64 paddr, size_t size_bytes)
 void mmio_unmap(mmioaddr_t addr, size_t size_bytes)
 {
     // FIXME: implement
+    /* 为何不能直接unmap?
+     */
 }
