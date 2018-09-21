@@ -72,6 +72,8 @@ public:
 
 static dynamic_percpu<cpu_sampler> _sampler;
 
+/* 在不超过max_value情况下,对var原子地加1
+ */
 template <typename T>
 static bool fetch_and_inc_if_less(std::atomic<T>& var, T& previous, T max_value)
 {
@@ -85,6 +87,8 @@ static bool fetch_and_inc_if_less(std::atomic<T>& var, T& previous, T max_value)
     return true;
 }
 
+/* 有空闲CPU时开始,开始后无空闲CPU则设置started为true并通知_controller进行唤醒
+ */
 static void start_on_current()
 {
     unsigned int prev_active;
@@ -101,6 +105,8 @@ static void start_on_current()
     }
 }
 
+/* 停止后无活跃CPU则通知_controller进行唤醒
+ */
 static void stop_on_current()
 {
     if (!_sampler->is_active()) {
@@ -145,6 +151,8 @@ void start_sampler(config new_config) throw()
     _config = new_config;
     std::atomic_thread_fence(std::memory_order_release);
 
+    /* 让所有CPU都执行start_on_current?
+     */
     WITH_LOCK(migration_lock) {
         start_on_current();
         start_sampler_ipi.send_allbutself();
@@ -168,6 +176,8 @@ void stop_sampler() throw()
 
     _controller.reset(*sched::thread::current());
 
+    /* 让所有CPU都执行stop_on_current
+     */
     WITH_LOCK(migration_lock) {
         stop_sampler_ipi.send_allbutself();
         stop_on_current();

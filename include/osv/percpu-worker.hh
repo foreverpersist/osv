@@ -32,6 +32,9 @@ public:
     friend class workman;
 };
 
+/* 虽然是class,几乎全是static方法,没有实质属性,
+   只是用面向对象强行写的面向过程实现
+ */
 // invokes work items in a per cpu manner
 class workman {
 public:

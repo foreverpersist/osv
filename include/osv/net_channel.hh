@@ -88,6 +88,8 @@ struct ipv4_tcp_conn_id {
     in_port_t src_port;
     in_port_t dst_port;
 
+    /* hash算法过于简单
+     */
     size_t hash() const {
         // FIXME: protection against hash attacks?
         return src_addr.s_addr ^ dst_addr.s_addr ^ src_port ^ dst_port;
@@ -109,6 +111,8 @@ struct hash<ipv4_tcp_conn_id> {
 
 }
 
+/* 维护了一张hash表: ipv4_tcp_conn_id -> net_channel
+ */
 class classifier {
 public:
     classifier();

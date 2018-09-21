@@ -56,6 +56,8 @@ void rwlock::runlock()
     }
 }
 
+/* 将只读升级为写
+ */
 bool rwlock::try_upgrade()
 {
     std::lock_guard<mutex> guard(_mtx);
@@ -81,6 +83,9 @@ void rwlock::wlock()
         _wrecurse++;
     }
 
+    /* 由一个不同于先前的owner持有,不需要重置_wrecurse
+       因为不存在写锁从一个出现递归线程突然转移到另一个线程的情况
+     */
     _wowner = sched::thread::current();
 }
 
@@ -105,12 +110,16 @@ void rwlock::wunlock()
     WITH_LOCK(_mtx) {
         assert(_wowner == sched::thread::current());
 
+        /* 退出一层递归,则减少_wrecurse,否则直接清除_wowner
+         */
         if (_wrecurse > 0) {
             _wrecurse--;
         } else {
             _wowner = nullptr;
         }
 
+        /* 优先唤醒一个write waiter,之后考虑所有read waiters
+         */
         if (!_write_waiters.empty()) {
             _write_waiters.wake_one(_mtx);
         } else {
@@ -119,6 +128,9 @@ void rwlock::wunlock()
     }
 }
 
+/* 先释放当前线程持有写锁,然后增加reader
+   释放写锁过程中,可能会唤醒其他write waiters,使得reader久久等待
+ */
 void rwlock::downgrade()
 {
     WITH_LOCK(_mtx) {

@@ -61,10 +61,14 @@ void worker_item::clear_work(sched::cpu* cpu)
 
 bool workman::signal(sched::cpu* cpu)
 {
+    /* 检查当前cpu->percpu_base上的_ready
+     */
     if (!(*_ready).load(std::memory_order_relaxed)) {
         return false;
     }
 
+    /* 设置指定cpu->percpu_base上的_duty,唤醒其上的_work_sheriff
+     */
     //
     // let the sheriff know that he have to do what he have to do.
     // we simply set _duty=true and wake the sheriff
@@ -83,16 +87,24 @@ bool workman::signal(sched::cpu* cpu)
     return true;
 }
 
+/* 每个CPU都会执行的线程方法
+ */
 void workman::call_of_duty(void)
 {
+    /* 设置当前cpu->percpu_base上的_ready
+     */
     (*_ready).store(true, std::memory_order_relaxed);
     trace_pcpu_worker_sheriff_started();
 
     while (true) {
+        /* 等待当前cpu->percpu_base上的_duty为true
+         */
         sched::thread::wait_until([&] {
             return ((*_duty).load(std::memory_order_relaxed) == true);
         });
 
+        /* 设置当前cpu->percpu_base的_duty为false
+         */
         (*_duty).store(false, std::memory_order_relaxed);
 
         // Invoke all work items that needs handling. FIXME: O(n)
@@ -102,6 +114,8 @@ void workman::call_of_duty(void)
 
         while (wi != end) {
 
+            /* 追踪和清理worker item, 并通知_handler执行真正的工作
+             */
             // Invoke worker item
             if (wi->have_work(current)) {
                 trace_pcpu_worker_item_invoke(wi);

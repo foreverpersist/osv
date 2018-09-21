@@ -38,6 +38,10 @@ void net_channel::process_queue()
     }
 }
 
+/* 唤醒polls和epolls
+   poll - 唤醒_poll_thread
+   epoll - epoll_wake_in_rcu
+ */
 void net_channel::wake_pollers()
 {
     WITH_LOCK(osv::rcu_read_lock) {
@@ -58,6 +62,9 @@ void net_channel::wake_pollers()
     }
 }
 
+/* 涉及RCU,先复制,再修改
+   del_poller同理
+ */
 void net_channel::add_poller(pollreq& pr)
 {
     WITH_LOCK(_pollers_mutex) {

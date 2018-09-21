@@ -17,6 +17,8 @@ callstack_collector::callstack_collector(size_t nr_traces, unsigned skip_frames,
     , _buffer(malloc(nr_traces * trace_object_size()))
     , _free_traces(_buffer)
 {
+    /* _buckets内部每个元素又是一层vector,分属于一个CPU
+     */
     for (auto c : sched::cpus) {
         _buckets.push_back(std::vector<table_type::bucket_type>(nr_traces, table_type::bucket_type()));
         auto& b = _buckets.back();
@@ -36,6 +38,8 @@ void callstack_collector::attach(tracepoint_base& tp)
 
 size_t callstack_collector::trace_object_size()
 {
+    /* _nr_frames个指针大小对应trace.pc的空间
+     */
     return sizeof(trace) + _nr_frames * sizeof(void*);
 }
 
@@ -95,20 +99,30 @@ bool callstack_collector::histogram_compare::operator()(trace* a, trace* b)
 inline bool operator==(const callstack_collector::trace& a,
                        const callstack_collector::trace& b)
 {
+    /* 比较区间[a.pc, a.pc + a.len]和[b.pc, b.pc + a.len]每一处
+     */
     return a.len == b.len && std::equal(a.pc, a.pc + a.len, b.pc);
 }
 
 inline bool bt_trace_compare(void** bt, const callstack_collector::trace& b)
 {
+    /* 比较区间[bt, bt + b.len]和[b.pc, b.pc + b.len]
+       既意味者bt应当是一个类似b.pc的数据
+     */
     return std::equal(bt, bt + b.len, b.pc);
 }
 
+/* 没必要定义一个struct,直接定义一个function(void *const *, unsigned)即可
+ */
 struct backtrace_hash {
     backtrace_hash(unsigned nr) : nr(nr) {}
     size_t operator()(void* const * bt) const {
         size_t r = 0;
         std::hash<const void*> hashfn;
         for (unsigned i = 0; i < nr; ++i) {
+            /* 按位分割乘 N-7 | 7 两部分,并交换左右位置
+               即: (N-7 | 7) -> (7 | N-7)
+             */
             r = (r << 7) | (r >> (sizeof(r)*8 - 7));
             r ^= hashfn(bt[i]);
         }
@@ -159,6 +173,8 @@ void callstack_collector::hit()
     ++i->hits;
 }
 
+/* 确实丢弃的是最不频繁的?为何不一次性丢弃?
+ */
 auto callstack_collector::histogram(size_t n) -> std::set<trace*, histogram_compare>
 {
     std::set<trace*, callstack_collector::histogram_compare> h;
