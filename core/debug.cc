@@ -168,6 +168,8 @@ void fill_debug_buffer(const char *msg, size_t len)
         buff_fspace = DEBUG_BUFFER_SIZE-debug_buffer_idx;
         memcpy(&debug_buffer[debug_buffer_idx], msg,
                 buff_fspace);
+        /* 直接覆盖,难道不会丢失信息?
+         */
         memcpy(&debug_buffer[0], &msg[DEBUG_BUFFER_SIZE-debug_buffer_idx],
                 len-buff_fspace);
         debug_buffer_idx = len-buff_fspace;

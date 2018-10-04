@@ -48,6 +48,8 @@ struct trace_record {
     };
 };
 
+/* 使用最终的format,从idx至N每次加上一个新的参数构成新的format
+ */
 template <size_t idx, size_t N, typename... args>
 struct tuple_formatter
 {
@@ -65,6 +67,8 @@ struct tuple_formatter<N, N, args...>
     }
 };
 
+/* format元组
+ */
 template <typename... args>
 inline
 boost::format& format_tuple(boost::format& fmt, std::tuple<args...> as)
@@ -80,6 +84,8 @@ boost::format format_tuple(const char* fmt, std::tuple<args...> as)
     return format_tuple(format, as);
 }
 
+/* 通过template定义了多种数据结构,区别仅在于sig的值
+ */
 template <typename T, typename = void>
 struct signature_char;
 
@@ -158,6 +164,8 @@ struct signature_char<T, typename std::enable_if<is_blob<T>::value>::type> {
     static const char sig = '*';
 };
 
+/* 对应上述多种数据结构的signature_helper
+ */
 template <typename... Args>
 struct signature_helper {
     static constexpr const char sig[] = { signature_char<Args>::sig..., '\0'};
@@ -169,6 +177,11 @@ constexpr const char signature_helper<Args...>::sig[];
 template <typename, typename = void>
 struct object_serializer;
 
+/* 对单个对象序列化
+       serialize - 直接写入对象值
+       size      - 对象大小
+       alignment - 对象大小和long大小中较小者
+ */
 template <typename arg>
 struct object_serializer<arg, typename std::enable_if<!is_blob<arg>::value>::type> {
     void serialize(arg val, void* buffer) { *static_cast<arg*>(buffer) = val; }
@@ -176,6 +189,11 @@ struct object_serializer<arg, typename std::enable_if<!is_blob<arg>::value>::typ
     size_t alignment() { return std::min(sizeof(arg), sizeof(long)); } // FIXME: want to use alignof here
 };
 
+/* 对一组对象序列化
+       serialize - 先写入数目,再逐个写入对象值 
+       size      - 包含数目占位的总大小
+       alignment - u16类型大小
+ */
 template <typename T>
 struct object_serializer<T, typename std::enable_if<is_blob<T>::value>::type> {
     using len_t = u16;
@@ -198,6 +216,11 @@ struct object_serializer<T, typename std::enable_if<is_blob<T>::value>::type> {
     size_t alignment() { return sizeof(len_t); }
 };
 
+/* 对const char*序列化
+       serialize - 写入字符串,长度max_len=50(用?填充),空串则写入<null>
+       size      - max_len=50
+       alignment - 1
+ */
 template <>
 struct object_serializer<const char*> {
     static constexpr size_t max_len = 50;
@@ -231,6 +254,9 @@ struct object_serializer<const char*> {
     size_t alignment() { return 1; }
 };
 
+/* write - 从idx至N,每次处理一个参数,并更新offset指示buffer的下次写入位置
+   size  - 从idx值N,每次处理一个参数,累加size
+ */
 template <size_t idx, size_t N, typename... args>
 struct serializer {
     [[gnu::always_inline]] // otherwise ld can discard a duplicate function (due to safe_load())

@@ -26,6 +26,9 @@ void mutex::lock()
 
     sched::thread *current = sched::thread::current();
 
+    /* 仅有当前线程加锁
+       count=1, owner=current, depth=1
+     */
     if (count.fetch_add(1, std::memory_order_acquire) == 0) {
         // Uncontended case (no other thread is holding the lock, and no
         // concurrent lock() attempts). We got the lock.
@@ -36,6 +39,9 @@ void mutex::lock()
         return;
     }
 
+    /* 当前线程在之前已经加锁
+       count--, depth++ 
+     */
     // If we're here the mutex was already locked, but we're implementing
     // a recursive mutex so it's possible the lock holder is us - in which
     // case we need to increment depth instead of waiting.
@@ -45,6 +51,9 @@ void mutex::lock()
         return;
     }
 
+    /* 锁被其他线程持有
+       将当前线程加入waitqueue
+     */
     // If we're here still here the lock is owned by a different thread.
     // Put this thread in a waiting queue, so it will eventually be woken
     // when another thread releases the lock.
@@ -58,11 +67,16 @@ void mutex::lock()
     auto old_handoff = handoff.load();
     if (old_handoff) {
          if (!waitqueue.empty()){
+            /* 将handoff原子地置0
+             */
             if (handoff.compare_exchange_strong(old_handoff, 0U)) {
                 // Note the explanation above about no concurrent pop()s also
                 // explains why we can be sure waitqueue is still not empty.
                 wait_record *other = waitqueue.pop();
                 assert(other);
+                /* 选择等待队列里的一个线程唤醒以竞争锁
+                   若选择的是自身,则直接获得锁
+                 */
                 if (other->thread() != current) {
                     // At this point, waiter.thread() must be != 0, otherwise
                     // it means someone has already woken us up, breaking the
@@ -83,6 +97,8 @@ void mutex::lock()
         }
     }
 
+    /* 等待被其他线程唤醒以获得锁
+     */
     // Wait until another thread pops us from the wait queue and wakes us up.
     trace_mutex_lock_wait(this);
     waiter.wait();
@@ -91,6 +107,14 @@ void mutex::lock()
     depth = 1;
 }
 
+/* wait morphing
+   背景: [condvar]解锁mutex和唤醒condvar是两个单独操作,可能有两种顺序
+        1. unlock(mutex) -> signal(condvar)
+           等待的线程被唤醒时,mutex已解锁,被唤醒的线程很容易获得锁
+        2. signal(condvar) -> unlock(mutex)
+           等待的线程被唤醒时,它试图获得锁,若此时mutex还未解锁,则线程又进入睡眠,
+           mutex解锁后再次被唤醒并获得锁(2次上下文切换 wait morphing)
+ */
 // send_lock() is used for implementing a "wait morphing" technique, where
 // the wait_record of a thread currently waiting on a condvar is put to wait
 // on a mutex, without waking it up first. This avoids unnecessary context
@@ -107,6 +131,8 @@ void mutex::lock()
 void mutex::send_lock(wait_record *wr)
 {
     trace_mutex_send_lock(this, wr);
+    /* 当前无线程竞争锁,唤醒wait record
+     */
     if (count.fetch_add(1, std::memory_order_acquire) == 0) {
         // Uncontended case (no other thread is holding the lock, and no
         // concurrent lock() attempts). We got the lock for wr, so wake it.
@@ -114,6 +140,8 @@ void mutex::send_lock(wait_record *wr)
         return;
     }
 
+    /* 将wait record加入waitqueue
+     */
     // If we can't grab the lock for wr now, we push it in the wait queue,
     // so it will eventually be woken when another thread releases the lock.
     waitqueue.push(wr);
@@ -126,6 +154,8 @@ void mutex::send_lock(wait_record *wr)
     if (old_handoff) {
         if (!waitqueue.empty()){
             if (handoff.compare_exchange_strong(old_handoff, 0U)) {
+                /* 从waitqueue选择一个线程唤醒以竞争锁
+                 */
                 wait_record *other = waitqueue.pop();
                 assert(other);
                 other->wake();
@@ -145,6 +175,8 @@ bool mutex::send_lock_unless_already_waiting(wait_record *wr)
     // count could not have been zero, so no need to test for it
     count.fetch_add(1, std::memory_order_acquire);
 
+    /* 将原本不存在的wait record加入waitqueue
+     */
     for (auto& x : waitqueue) {
         if (wr->thread() == x.thread()) {
             return false;
@@ -169,6 +201,8 @@ bool mutex::send_lock_unless_already_waiting(wait_record *wr)
 // thread it wakes, we wouldn't need this function.
 void mutex::receive_lock()
 {
+    /* 由send_lock唤醒的线程使用,直接设置owner, depth
+     */
     trace_mutex_receive_lock(this);
     owner.store(sched::thread::current(), std::memory_order_relaxed);
     depth = 1;
@@ -178,6 +212,8 @@ bool mutex::try_lock()
 {
     sched::thread *current = sched::thread::current();
     int zero = 0;
+    /* 无竞争直接加锁
+     */
     if (count.compare_exchange_strong(zero, 1, std::memory_order_acquire)) {
         // Uncontended case. We got the lock.
         owner.store(current, std::memory_order_relaxed);
@@ -186,6 +222,8 @@ bool mutex::try_lock()
         return true;
     }
 
+    /* 当前线程已加锁,直接增加depth
+     */
     // We're implementing a recursive mutex -lock may still succeed if
     // this thread is the one holding it.
     if (owner.load(std::memory_order_relaxed) == current) {
@@ -194,6 +232,8 @@ bool mutex::try_lock()
         return true;
     }
 
+    /* 获得handoff机会,直接加锁
+     */
     // The lock is taken, and we're almost ready to give up (return
     // false), but the last chance is if we can accept a handoff - and if
     // we do, we got the lock.
@@ -219,15 +259,21 @@ void mutex::unlock()
     // performance penalty, so we leave them in.
     assert(owner.load(std::memory_order_relaxed) == sched::thread::current());
     assert(depth!=0);
+    /* 当前线程多次加锁,直接减少depth
+     */
     if (--depth)
         return; // recursive mutex still locked.
 
+    /* 当前线程仅剩一次加锁,清空owner
+     */
     // When we return from unlock(), we will no longer be holding the lock.
     // We can't leave owner==current, otherwise a later lock() in the same
     // thread will think it's a recursive lock, while actually another thread
     // is in the middle of acquiring the lock and has set count>0.
     owner.store(nullptr, std::memory_order_relaxed);
 
+    /* 无其他线程等待,直接返回
+     */
     // If there is no waiting lock(), we're done. This is the easy case :-)
     if (count.fetch_add(-1, std::memory_order_release) == 1) {
         return;
@@ -242,11 +288,17 @@ void mutex::unlock()
     // iteration just pop and return?
     while(true) {
         wait_record *other = waitqueue.pop();
+        /* 选择一个线程唤醒
+         */
         if (other) {
             assert(other->thread() != sched::thread::current()); // this thread isn't waiting, we know that :(
             other->wake();
             return;
         }
+        /*  有线程竞争锁,但还未进入waitqueue
+            增加sequence,设置handoff,让本线程或其他线程唤醒一个wait record
+            (sequence的数值貌似没啥用, handoff似乎只需要区分0与非0即可,数值无意义?)
+         */
         // Some concurrent lock() is in progress (we know this because of
         // count) but it hasn't yet put itself on the wait queue.
         if (++sequence == 0U) ++sequence;  // pick a number, but not 0

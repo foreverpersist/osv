@@ -25,6 +25,9 @@ void arc_buf_accessed(const uint64_t[4]);
 void arc_buf_get_hashkey(arc_buf_t*, uint64_t[4]);
 }
 
+/* 定义了hashkey, mmu::hw_ptep<0>, arc_hashkey的hash算法
+   hash<const mmu::pt_element>不知定义在哪里?
+ */
 namespace std {
 template<>
 struct hash<pagecache::hashkey> {
@@ -48,6 +51,8 @@ struct hash<pagecache::arc_hashkey> {
     }
 };
 
+/* begin,end有必要单独定义一个函数?
+ */
 std::unordered_set<mmu::hw_ptep<0>>::iterator begin(std::unique_ptr<std::unordered_set<mmu::hw_ptep<0>>> const& e)
 {
     return e->begin();
@@ -67,6 +72,9 @@ static unsigned lru_free_count = 20;
 constexpr unsigned max_lru_free_count = 200;
 static void* zero_page;
 
+/* 设置参数
+   zero_page持有一个全0的page
+ */
 void  __attribute__((constructor(init_prio::pagecache))) setup()
 {
     lru_max_length = std::max(memory::phys_mem_size / memory::page_size / 100, size_t(100));
@@ -79,9 +87,16 @@ class cached_page {
 protected:
     const hashkey _key;
     void* _page;
+    /* 此类型类似于union,实际类型是其中之一
+       _ptes可能是std::nullptr_t
+            可能是mmu::hw_ptep<0>
+            可能是unordered_set<mmu::hw_ptep<0>>
+     */
     typedef boost::variant<std::nullptr_t, mmu::hw_ptep<0>, std::unique_ptr<std::unordered_set<mmu::hw_ptep<0>>>> ptep_list;
     ptep_list _ptes; // set of pointers to ptes that map the page
 
+    /* 持有ptep_list&的static_visitor
+     */
     template<typename T>
     class ptes_visitor : public boost::static_visitor<T> {
     protected:
@@ -89,6 +104,12 @@ protected:
     public:
         ptes_visitor(ptep_list& ptes) : _ptes(ptes) {}
     };
+    /* 持有ptep_list&, mmu::hw_ptep<0>&的static_visitor<void>
+       访问流程
+           1. 初始状态nullptr_t       -> _ptes直接置为_ptep
+           2. 已访问一个hw_ptep<0>    ->  _ptes置为仅包含_ptep的unordered_set
+           3. 已访问多个unordered_set ->  _ptes加入_ptep
+     */
     class ptep_add : public ptes_visitor<void> {
         mmu::hw_ptep<0>& _ptep;
     public:
@@ -105,6 +126,12 @@ protected:
             set->emplace(_ptep);
         }
     };
+    /* 持有ptep_list&, mmu::hw_ptep<0>&的static_visitor<int>
+       访问流程
+           1. 初始状态nullptr_t       -> 不允许(因为已然是nullptr_t,无可删减)
+           2. 已访问一个hw_ptep<0>    -> _ptes置为nullptr_t
+           3. 已访问多个unordered_set -> _ptes移除_ptep,若移除后仅剩一个,则_ptep置为仅剩的hw_ptep<0>
+     */
     class ptep_remove : public ptes_visitor<int> {
         mmu::hw_ptep<0>& _ptep;
     public:
@@ -139,9 +166,13 @@ protected:
         Ret operator()(std::nullptr_t &v) {
             return _initial;
         }
+        /* 对ptep执行_mapper, _reducer
+         */
         Ret operator()(mmu::hw_ptep<0>& ptep) {
             return _reducer(_initial, _mapper(ptep));
         }
+        /* 对set中每一个元素执行_mapper, _reducer
+         */
         Ret operator()(std::unique_ptr<std::unordered_set<mmu::hw_ptep<0>>>& set) {
             Ret acc = _initial;
             for (auto&& i: set) {
@@ -165,10 +196,14 @@ public:
     }
 
     void map(mmu::hw_ptep<0> ptep) {
+        /* _ptes加入ptep,历经变化nullptr_t -> hw_ptep -> unordered_set
+         */
         ptep_add add(_ptes, ptep);
         boost::apply_visitor(add, _ptes);
     }
     int unmap(mmu::hw_ptep<0> ptep) {
+        /* _ptes移除ptep,历经变化unordered_set -> hw_ptep -> nullptr_t
+         */
         ptep_remove rm(_ptes, ptep);
         return boost::apply_visitor(rm, _ptes);
     }
@@ -176,12 +211,18 @@ public:
         return _page;
     }
     int flush() {
+        /* 对_ptes逐一执行mmu::clear_pte,返回pte数目
+         */
         return for_each_pte([] (mmu::hw_ptep<0> pte) { mmu::clear_pte(pte); return 1;});
     }
     int clear_accessed() {
+        /* 对_ptes逐一执行mmu::clear_accessed,返回pte数目
+         */
         return for_each_pte([] (mmu::hw_ptep<0> pte) -> int { return mmu::clear_accessed(pte); });
     }
     int clear_dirty() {
+        /* 对_ptes逐一执行mmu::clear_dirty,返回pte数目
+         */
         return for_each_pte([] (mmu::hw_ptep<0> pte) -> int { return mmu::clear_dirty(pte); });
     }
     const hashkey& key() {
@@ -207,6 +248,8 @@ public:
             vrele(_vp);
         }
     }
+    /* 清除_dirty标志,对_page执行I/O操作 
+     */
     int writeback()
     {
         int error;
@@ -221,6 +264,8 @@ public:
 
         return error;
     }
+    /* 将page从cache变为匿名页, _page置为空
+     */
     void* release() { // called to demote a page from cache page to anonymous
         assert(boost::get<std::nullptr_t>(_ptes) == nullptr);
         void *p = _page;
@@ -231,6 +276,8 @@ public:
     void mark_dirty() {
         _dirty |= true;
     }
+    /* 对_ptes执行clear_pte,并检查是否有任何一个pte为dirty
+     */
     bool flush_check_dirty() {
         return for_each_pte([] (mmu::hw_ptep<0> pte) { return mmu::clear_pte(pte).dirty(); }, std::logical_or<bool>(), false);
     }
@@ -250,12 +297,16 @@ private:
     arc_buf_t* _ab;
     bool _removed = false;
 
+    /* 向arc_cache_map加入(ab, pc)
+     */
     static arc_buf_t* ref(arc_buf_t* ab, cached_page_arc* pc)
     {
         arc_cache_map.emplace(ab, pc);
         return ab;
     }
 
+    /* 从arc_cache_map移除(ab, pc)
+     */
     static bool unref(arc_buf_t* ab, cached_page_arc* pc)
     {
         auto it = arc_cache_map.equal_range(ab);
@@ -275,6 +326,9 @@ public:
     arc_buf_t* arcbuf() {
         return _ab;
     }
+    /* 将ab对应的所有arc_page_cache*从read_cache和arc_cache_map移除
+       从read_cache移除前,对每个_ptes内部每项执行clear_pte,处理的pte大于0,则刷新全部TLB
+     */
     static void unmap_arc_buf(arc_buf_t* ab) {
         auto it = arc_cache_map.equal_range(ab);
         unsigned count = 0;
@@ -302,6 +356,8 @@ static std::deque<cached_page_write*> write_lru;
 static mutex arc_lock; // protects against parallel access to the read cache
 static mutex write_lock; // protect against parallel access to the write cache
 
+/* 直接的map查找
+ */
 template<typename T>
 static T find_in_cache(std::unordered_map<hashkey, T>& cache, hashkey& key)
 {
@@ -314,6 +370,8 @@ static T find_in_cache(std::unordered_map<hashkey, T>& cache, hashkey& key)
     }
 }
 
+/* cached_page.map()
+ */
 TRACEPOINT(trace_add_read_mapping, "buf=%p, addr=%p, ptep=%p", void*, void*, void*);
 void add_read_mapping(cached_page_arc *cp, mmu::hw_ptep<0> ptep)
 {
@@ -321,6 +379,9 @@ void add_read_mapping(cached_page_arc *cp, mmu::hw_ptep<0> ptep)
     cp->map(ptep);
 }
 
+/* cached_page.unmap()
+   当cp的ptep数量为0时,从read_cache移除
+ */
 TRACEPOINT(trace_remove_mapping, "buf=%p, addr=%p, ptep=%p", void*, void*, void*);
 void remove_read_mapping(cached_page_arc* cp, mmu::hw_ptep<0> ptep)
 {
@@ -340,9 +401,13 @@ void remove_read_mapping(hashkey& key, mmu::hw_ptep<0> ptep)
     }
 }
 
+/* 清理cp->_ptes,从read_cache移除cp,必要时刷新全部TLB
+ */
 TRACEPOINT(trace_drop_read_cached_page, "buf=%p, addr=%p", void*, void*);
 unsigned drop_read_cached_page(cached_page_arc* cp, bool flush)
 {
+    /* 进行flush,若指定需要flush TLB且flush的pte数目大于1,则刷新所有TLB
+     */
     trace_drop_read_cached_page(cp->arcbuf(), cp->addr());
     int flushed = cp->flush();
     read_cache.erase(cp->key());
@@ -373,6 +438,9 @@ void unmap_arc_buf(arc_buf_t* ab)
     cached_page_arc::unmap_arc_buf(ab);
 }
 
+/* 新建cached_page_arc,加入arc_cache_map和read_cache,
+   并执行arc_share_buf(置ab->b_hdr->b_mapped=1)
+ */
 TRACEPOINT(trace_map_arc_buf, "buf=%p page=%p", void*, void*);
 void map_arc_buf(hashkey *key, arc_buf_t* ab, void *page)
 {
@@ -383,11 +451,15 @@ void map_arc_buf(hashkey *key, arc_buf_t* ab, void *page)
     arc_share_buf(ab);
 }
 
+/* 实现细节未知?
+ */
 static int create_read_cached_page(vfs_file* fp, hashkey& key)
 {
     return fp->get_arcbuf(&key, key.offset);
 }
 
+/* 新建cache_page_write并通过sys_read将相应数据读入内存
+ */
 static std::unique_ptr<cached_page_write> create_write_cached_page(vfs_file* fp, hashkey& key)
 {
     size_t bytes;
@@ -398,6 +470,13 @@ static std::unique_ptr<cached_page_write> create_write_cached_page(vfs_file* fp,
     return std::unique_ptr<cached_page_write>(cp);
 }
 
+/* 将cp加入write_cache和write_lru头部
+   若write_lru超出lru_max_length限制,从尾部取出lru_free_count个cache_page_write*,
+       从write_cache删除,
+       对每项执行fluish_check_dirty(clear_pte并检查是否有dirty项),必要时标记其为dirty,以便析构时writeback
+       刷新TLB
+       析构每项,触发dirty项执行writeback
+ */
 TRACEPOINT(trace_drop_write_cached_page, "addr=%p", void*);
 static void insert(cached_page_write* cp) {
     static cached_page_write* tofree[max_lru_free_count];
@@ -422,6 +501,21 @@ static void insert(cached_page_write* cp) {
     }
 }
 
+/* 写
+       - 无旧cache (新建cached_page_write)
+           - share   将新cache加入write_cache和write_lru,从read_cache移除同key项,在cache中加入ptep,写入pte
+           - private 从read_cache移除同key项,将cache转为匿名页,写入pte
+       - 有旧cache
+           - share   在cache中加入ptep,写入pte
+           - private 拷贝cache内容至新的匿名页,写入pte
+   读
+       - 无旧cache
+           - share   尝试找到读cache,加入ptep,写入标记为COW的pte,找不到读cache则尝试新建,存在写cache则操作失败
+           - private 尝试找到读cache,加入ptep,写入标记为COW的pte,找不到读cache则尝试新建,存在写cache则操作失败
+       - 有旧cache
+           - share   在cache中加入ptep,写入pte
+           - private 在cache中加入ptep,写入标记为COW的pte
+ */
 bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pte, bool write, bool shared)
 {
     struct stat st;
@@ -432,21 +526,32 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
 
     if (write) {
         if (!wcp) {
+            /* 新建cached_page_write
+             */
             auto newcp = create_write_cached_page(fp, key);
             if (shared) {
+                /* 将释放newcp所有权
+                   将wcp加入write_cache和write_lru
+                 */
                 // write fault into shared mapping, there page is not in write cache yet, add it.
                 wcp = newcp.release();
                 insert(wcp);
+                /* 若read_cache中原本存在相同key的cached_pge_arc,则删除,保证唯一key
+                 */
                 // page is moved from ARC to write cache
                 // drop ARC page if exists, removing all mappings
                 drop_read_cached_page(key);
             } else {
+                /* 从read_cache中移除ptep,写入新的pte?
+                 */
                 // remove mapping to ARC page if exists
                 remove_read_mapping(key, ptep);
                 // cow of private page from ARC
                 return mmu::write_pte(newcp->release(), ptep, pte);
             }
         } else if (!shared) {
+            /* 拷贝一份文件数据,写入新的pte
+             */
             // cow of private page from write cache
             void* page = memory::alloc_page();
             memcpy(page, wcp->addr(), mmu::page_size);
@@ -459,6 +564,8 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
             WITH_LOCK(arc_lock) {
                 cached_page_arc* cp = find_in_cache(read_cache, key);
                 if (cp) {
+                    /* 在cache_page_arc中加入新的ptep,并写入新的pte
+                     */
                     add_read_mapping(cp, ptep);
                     return mmu::write_pte(cp->addr(), ptep, mmu::pte_mark_cow(pte, true));
                 }
@@ -470,6 +577,8 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
                 ret = create_read_cached_page(fp, key);
             }
 
+            /* 在write_cache中存在,则放弃操作
+             */
             // we dropped write lock, need to re-check write cache again
             wcp = find_in_cache(write_cache, key);
             if (wcp) {
@@ -480,15 +589,23 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
 
         } while (ret != -1);
 
+        /* 写入新的pte
+         */
         // try to access a hole in a file, map by zero_page            }
         return mmu::write_pte(zero_page, ptep, mmu::pte_mark_cow(pte, true));
     }
 
+    /* 在cached_page_write加入新的ptep,写入新的pte
+     */
     wcp->map(ptep);
 
     return mmu::write_pte(wcp->addr(), ptep, mmu::pte_mark_cow(pte, !shared));
 }
 
+/* 从write_cache或read_cache中移除ptep
+       - write_cache必要时标记dirty以触发writeback
+       - read_cache必要时清除cached_page_arc
+ */
 bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
 {
     struct stat st;
@@ -503,6 +620,8 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
         cached_page_write* wcp = find_in_cache(write_cache, key);
 
         if (wcp && mmu::virt_to_phys(wcp->addr()) == old.addr()) {
+            /* 从cached_page_write中移除ptep,若ptep为dirty则标志dirty
+             */
             // page is in write cache
             wcp->unmap(ptep);
             if (old.dirty()) {
@@ -516,6 +635,8 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
     WITH_LOCK(arc_lock) {
         cached_page_arc* rcp = find_in_cache(read_cache, key);
         if (rcp && mmu::virt_to_phys(rcp->addr()) == old.addr()) {
+            /* 从cached_page_arc中移除ptep,必要时从read_cache中移除cached_page_arc
+             */
             // page is in ARC
             remove_read_mapping(rcp, ptep);
             return false;
@@ -526,6 +647,8 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
     return addr != zero_page;
 }
 
+/* 检查write_cache中相关的项,清除dirty,执行writeback
+ */
 void sync(vfs_file* fp, off_t start, off_t end)
 {
     static std::stack<cached_page_write*> dirty; // protected by write_lock
@@ -534,6 +657,9 @@ void sync(vfs_file* fp, off_t start, off_t end)
     hashkey key {st.st_dev, st.st_ino, 0};
     SCOPE_LOCK(write_lock);
 
+    /* 以页为单位检查涉及到所有cached_page_write,逐一执行clear_dirty(针对ptep_list)
+       有效执行了clear_dirty的cached_page_write将被加入dirty
+     */
     for (key.offset = start; key.offset < end; key.offset += mmu::page_size) {
         cached_page_write* cp = find_in_cache(write_cache, key);
         if (cp && cp->clear_dirty()) {
@@ -543,6 +669,8 @@ void sync(vfs_file* fp, off_t start, off_t end)
 
     mmu::flush_tlb_all();
 
+    /* 对dirty中的cached_page_write逐一执行writeback
+     */
     while(!dirty.empty()) {
         auto cp = dirty.top();
         auto err = cp->writeback();
@@ -553,6 +681,8 @@ void sync(vfs_file* fp, off_t start, off_t end)
     }
 }
 
+/* 此部分似乎与前面的内容没有紧密的关联
+ */
 TRACEPOINT(trace_access_scanner, "scanned=%u, cleared=%u, %%cpu=%g", unsigned, unsigned, double);
 static class access_scanner {
     static constexpr double _max_cpu = 20;
@@ -566,6 +696,8 @@ public:
     }
 
 private:
+    /* 对accessed逐一执行arc_buf_accessed,然后将其清空
+     */
     bool mark_accessed(std::unordered_set<arc_hashkey>& accessed) {
         if (accessed.empty()) {
             return false;
@@ -585,25 +717,37 @@ private:
         while (true) {
             unsigned buckets_scanned = 0;
             bool flush = false;
+            /* bucket_count即为不同key的数量
+             */
             auto bucket_count = cached_page_arc::arc_cache_map.bucket_count();
 
             double work = (1000000000 * _cpu)/100;
             double sleep = 1000000000 - work;
 
+            /* sleep一段时间重新唤醒
+             */
             sched::thread::sleep(std::chrono::nanoseconds(static_cast<unsigned long>(sleep/_freq)));
 
             auto start = sched::thread::current()->thread_clock();
             auto deadline = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::nanoseconds(static_cast<unsigned long>(work/_freq))) + start;
 
             WITH_LOCK(arc_lock) {
+                /* 超时或扫描完arc_cache_map结束
+                 */
                 while (sched::thread::current()->thread_clock() < deadline && buckets_scanned < bucket_count) {
+                    /* current_bucket进行到最大值时重置为0,重新开始扫描
+                     */
                     if (current_bucket >= cached_page_arc::arc_cache_map.bucket_count()) {
                         current_bucket = 0;
                     }
+                    /* 扫描当前桶的所有cached_page_arc,扫描完scanned加1
+                     */
                     std::for_each(cached_page_arc::arc_cache_map.begin(current_bucket), cached_page_arc::arc_cache_map.end(current_bucket),
                             [&accessed, &scanned, &cleared](cached_page_arc::arc_map::value_type& p) {
                         auto arcbuf = p.first;
                         auto cp = p.second;
+                        /* 若cached_page_arc有效清除了_ptes,则将其加入accessed,并让cleared加1
+                         */
                         if (cp->clear_accessed()) {
                             arc_hashkey arc_hashkey;
                             arc_buf_get_hashkey(arcbuf, arc_hashkey.key);
@@ -615,6 +759,8 @@ private:
                     current_bucket++;
                     buckets_scanned++;
 
+                    /* accessed每累加1024个,执行mark_accessed
+                     */
                     // mark ARC buffers as accessed when we have 1024 of them
                     if (!(cleared % 1024)) {
                         DROP_LOCK(arc_lock) {
@@ -624,6 +770,8 @@ private:
                 }
             }
 
+            /* 对剩下未处理的accessed执行mark_accesse
+             */
             // mark leftovers ARC buffers as accessed
             flush = mark_accessed(accessed);
 
@@ -631,6 +779,10 @@ private:
                 mmu::flush_tlb_all();
             }
 
+            /* 扫描完一轮,或者处理过非空的桶,将_cpu设为_min_cpu
+               否则将_cpu设为原来的(cleared * 5 / scanned)倍,但必须限定在[_min_cpu, _max_cpu]之间
+               cleared增加的比例大于scanned(反映出有许多arc需要处理accessed),则_cpu增大,下一次执行的时间就到来的更早
+             */
             if (buckets_scanned == bucket_count || !scanned) {
                 _cpu = _min_cpu;
             } else {

@@ -136,6 +136,8 @@ private:
     void fire(percpu_timer_task&);
     void free_registration(percpu_timer_task& task);
 
+    /* 此属性好像没啥用?仅仅是记录了_active_task的变化,不影响实际操作
+     */
     bi::list<percpu_timer_task,
         bi::member_hook<percpu_timer_task,
             bi::list_member_hook<>,
@@ -144,6 +146,8 @@ private:
     percpu_timer_task* _active_task;
 
     mutex& _mutex;
+    /* 此属性好像没啥用?没有wait record参与
+     */
     waitqueue _registrations_drained;
 
     callback_t _callback;
@@ -220,6 +224,8 @@ private:
     int _n_scheduled;
     mutex& _lock;
     timer_task _task;
+    /* 好像没啥用?没有wait record参与
+     */
     waitqueue _all_done;
 };
 

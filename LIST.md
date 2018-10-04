@@ -36,20 +36,21 @@ Description Labels:
 | rwlock          | sched,condvar,waitqueue          | [N] ...     |
 | callstack       | percpu,trace                     | [N] ...     |
 | net_channel     | sched,rcu,net_trace,debug        | [N] ...     |
-| xen_intr        | sched,percpu,trace,debug         | [N]         |
-| select          | poll,debug                       | [N]         |
-| condvar         | sched,trace                      | [N]         |
-| debug           | sched,printf                     | [N]         |
-| osv_execve      | run,condvar,osv_execve,debug     | [N]         |
-| rcu             | mempool,percpu,semaphore,debug   | [N]         |
-| poll            | epoll,trace                      | [I]         |
-| epoll           | pool,trace,debug                 | [I]         |
-| lfmutex         | sched,trace                      | [I]         |
-| async           | sched,percpu,condvar,waitqueue,trace,printf                  | [I]         |
-| command         | power,debug                                                  | [I]         |
-| app             | sched,elf,run,power,trace                                    | [I]         |
-| pagecache       | mmu,mempool,trace                                            | [I]         |
-| trace           | sched,percpu,semaphore,elf,rcu,debug                         | [I]         |
+| xen_intr        | sched,percpu,trace,debug         | [N] ...     |
+| select          | poll,debug                       | [N] ...     |
+| condvar         | sched,trace                      | [N] ...     |
+| debug           | sched,printf                     | [N] ...     |
+| osv_execve      | run,condvar,osv_execve,debug     | [N] ...     |
+| rcu             | mempool,percpu,semaphore,debug   | [N] ...     |
+| poll            | epoll,trace                      | [I] ...     |
+| epoll           | pool,trace,debug                 | [I] ...     |
+| lfmutex         | sched,trace                      | [I] ...     |
+| async           | sched,percpu,condvar,waitqueue,trace,printf                  | [I] ...     |
+| commands        | power,debug                                                  | [I] ...     |
+| app             | sched,elf,run,power,trace                                    | [I] ...     |
+| pagecache       | mmu,mempool,trace                                            | [I] ...     |
+| dhcp            | sched,mutex,debug                                            | [I] ...     |
+| trace           | sched,percpu,semaphore,elf,rcu,debug                         | [I] ...     |
 | elf             | sched,mmu,trace,version,demangle,app,debug                   | [I]         |
 | mempool         | sched,mmu,percpu,condvar,semaphore,percpu-worker,trace,debug | [I]         |
 | sched           | percpu,elf,math,app,rcu,rwlock,trace,debug                   | [I]         |
@@ -58,9 +59,9 @@ Description Labels:
 
 # percpu per-cpu-counter trace-count
 
-使用了定于在sched.cc中的全局域percpu_base - 表示当前CPU的percpu_base
+使用了定义于sched.cc中的全局域percpu_base - 表示当前CPU的percpu_base
 
-使用了定义在percpu.cc中的文件域buffer - 一个percpu类型(多CPU副本)
+使用了定义于percpu.cc中的文件域buffer - 一个percpu类型(多CPU副本)
 
 percpu<T>(每个CPU会自动持有一个副本)
 	对数据的操作均重定义到percpu_base + offset
@@ -176,7 +177,7 @@ stop_sampler
 
 # worker_item workman
 
-使用定义于percpu-worker.cc中的全局域
+使用了定义于percpu-worker.cc的全局域
 	(PERCPU) workman::_duty, workman::_ready, workman::_work_sheriff
 	(extern) _percpu_workers_start, _percpu_workers_end
 	workman::_cpu_notifier, workman_instance
@@ -205,7 +206,7 @@ work_item.signal(),_percpu_workers_xxx应当由外部操控,来间接控制worke
 
 记录内存分配的调用路径,用于分析内存泄漏
 
-使用定义于alloctracker.cc中全局域alloc_tracker::in_tracker
+使用了定义于alloctracker.cc的全局域alloc_tracker::in_tracker
 
 alloc_info
 	仅一个struct
@@ -303,3 +304,439 @@ classifier
 	* add加入一组映射
 	* remove清除一组映射
 	* post_packet解析ipv4_tcp_conn_id,放入对应net_channel并唤醒
+
+
+# xen_intr
+
+处理xen中断,定义了文件域单例xen_irq_handlers以提供面向过程API
+
+使用了定义于xen.hh的全局域hypercall_page, xen_features, xen_start_info, 
+                          HYPERVISOR_shared_info, xen_shared_info
+使用了定义于xen_intr.cc的全局域xen_irq::_thread和文件域xen_allocated_irqs, xen_irq_handlers
+
+xen_irq
+	持有interrupt, cpu::notifier, (PERCPU)(static)thread*属性
+	* register_irq/unregister_irq设置/取消xen_allocated_irqs指定项
+	* wake唤醒PERCPU中断线程
+	* 中断线程等待标志位,然后逐一检查端口并回调,然后重置端口位
+	* interrupt属性似乎完全没啥用
+
+
+# select
+
+select
+	借助poll实现select语义
+
+pselect
+	转换了timeout,在select前后做了sigprocmask处理
+
+
+# condvar
+
+非常类似waitqueue(不像POSIX标准, 并无signal改变条件操作)
+
+	持有_waiters_fifo(两个wait_record* - oldest, newest), mutex_t, mutex_t*属性
+	* mutex_t*记录最后wait使用的mutex
+	* wait为当前线程新建wait record等待超时或被wake_one/wake_all唤醒(并无signal操作,很玄学)
+	* wake_one选择oldest wait record通知send_lock
+	* wake_all遍历wait records通知send_lock
+
+
+# debug
+
+输出调试信息(severity, tag, fmt)
+
+使用了定义于debug.cc的全局域logger::_instance, debug_buffer, debug_buffer_idx, debug_buffer_full, verbose
+
+使用logger单例模式提供面向过程API
+
+logger
+	持有map<string, logger_severity>, mutex, (static)logger*属性
+	* instance实例化单例_instance
+	* wrt调用vkprintf或debug输出
+
+debug使用一个buffer,执行flush时通过console输出(貌似buffer满时无自动输出操作,可能会丢失信息?)
+
+debug_early通过console::arch_early_console输出
+
+
+# osv_execve
+
+在新的ELF namespace执行program
+(ELF namespace是什么? 为何可以调用std::thread?它又怎样执行?)
+
+使用了定义于osv_execve.cc的文件域exited_threads, exec_mutex, cond
+
+osv_execve
+	创建std::thread执行thread_run_app_in_namespace
+		设置thread_id为当前线程tid
+		调用osv::application::run_and_join
+		记录返回码
+		唤醒原线程
+		通过写入1回调notification_fd
+	让原线程wait触发CPU schedule
+	返回错误码
+
+osv_waittid
+	在exec_mutex, cond下从exited_threads无限循环查找指定tid,返回status
+
+
+# rcu
+
+使用了定义于rcu.cc的全局域rcu_read_lock, peempt_lock_in_rcu, rcu_read_lock_in_peempt_disabled, cpu_notifier
+和文件域(PERCPU)percpu_callbacks, cpu_quiescent_state_threads, cpu_quiescent_state_thread::next_generation
+        (PERCPU)percpu_quiescent_state_thread, (PERCPU)percpu_waiting_defers
+
+rcu_ptr
+	持有atomic<T*>属性
+	* read/read_by_owner原子读取
+	* assign原子写入
+	* 析构时销毁T*
+
+cpu_quiescent_state_thread
+	持有thread, uint64_t * 2(_generation, _request), bool, (static)uint64_t属性
+	* thread线程执行work
+		唤醒percpu_waiting_defers上的wait records
+		设置CPU的generation,同步来自其他CPU的request
+	* request设置_request为指定的更高generation
+	* check检查_generation是否不低于指定generation
+
+rcu_defer加入一个callback到percpu_callbacks
+
+rcu_synchronize通过在当前CPU加入一个信号量增加计数的回调,等待generation同步完成
+
+rcu_flush通过在每个CPU加入一个信号量增加计数的回调,等待所有generation同步完成
+
+
+# poll
+
+一次poll形成一个pollreq,包含多个(fp, events),pollreq会被内部每个fp关联以便从任意fp唤醒
+
+poll_file
+	持有fileref, int * 2(events, last_poll_wake_count), short属性
+
+pollreq
+	持有vector<poll_file>, nfds_t, bool, thread_handle属性
+
+poll_wake唤醒epoll和所有相关的pollreq
+
+poll尝试立即返回,若失败则等待poll_wake的唤醒或超时
+
+
+# epoll
+
+通过传入class实例实现面向过程API
+
+epoll_key
+	持有int, file*属性
+
+epoll_ptr
+	持有epoll_file*, epoll_key属性
+
+epoll_file
+	持有map, mutex, set, waitqueue, queue, bool, thread_handle属性
+	* add向map添加(key, event),向f_epools添加(this, key),如有可能直接wake(key)
+	* mod修改(key, event),尝试向f_epools添加(this, key),如有可能直接wake(key)
+	* del从map删除(key, event),从f_epools删除(this, key)
+	* wait等待_waiter唤醒,超时或出现待处理activity,然后处理
+		flush_activity_ring将待处理activity移动到set
+		process_activity检查events,移除f_epolls无效内容或重新添加内容
+	* wake/wake_in_rcu添加key到queue,唤醒wait所在阻塞线程
+
+epoll_create创建一个epoll_file (会分配一个fd,这个fd是否是临时的?何时失效?)
+
+epoll_ctl/epoll_wait/epoll_file_closed/epoll_wake_in_rcu在epoll_file上操作
+
+
+# lfmutex
+
+基于lock-free的多生产者单消费者队列(Multi-Producer Single-Consumer)实现的lock-free互斥锁
+
+核心是原子操作
+
+通过传入class实例实现面向过程API
+
+queue_mpsc
+	持有atomic<LT*> (pushlist)和LT* (poplist)属性
+	* push使用循环配合compare_exchange_weak修改pushlist头指针
+	* pop从poplist取出,若poplist为空,则通过exchange取出pushlist并反转加入poplist
+	* iterator持有pushlist, poplist,优先选择pushlist操作
+
+mutex
+	持有atomic<int>, int, thread*, queue_mpsc<wait_record>, atomic<unsigned int>, unsigned int属性
+	* lock尝试加锁或递归加锁,失败则加入等待队列,尝试执行handoff(handoff选中自己时直接加锁,否则线程等待)
+		handoff
+		* 在一个线程unlock时激活,只能被一个线程执行
+		* 选择waitqueu里一个线程唤醒
+	* send_lock无竞争时唤醒指定wait record,否则将其加入等待队列,尝试执行handoff
+	* send_lock_unless_already_waiting由加锁线程执行,将不存在的wait record加入等待队列
+	* receive_lock由send_lock唤醒的线程使用,直接加锁
+	* try_lock尝试加锁,递归加锁,或通过handoff加锁(此处并不之心handoff,而只是利用此条件直接加锁)
+	* unlock解一层递归锁或解锁,解锁后若有等待线程,则唤醒等待队列一个线程,
+                若等待线程尚未进入队列,则激活handoff,由自己或其他线程执行handoff(使用了循环确保handoff执行)
+
+
+# async
+
+使用了定义于async.cc的文件域_percpu_worker, _notifier
+
+aysnc_worker代表一个CPU上的worker,负责处理此CPU上注册的tasks
+	持有属性
+	    timer_set (_timer_tasks), slist (_queue), unordered_queue_mpsc (released_timer_tasks), 
+	    thread, timer, cpu*
+	* timers_set用于存放普通未过期的task(task.queue=true)
+	* slist用于存放one_shot_tasks
+	* unordered_queue_mpsc用于存放已完成的tasks以便重用
+	* thread线程执行run(死循环)
+		* 等待timer或_queue非空
+		* 以now为界,逐一取出_timer_tasks过期任务,对非RELEASED状态任务执行fire
+		* 重置timer以便下一次唤醒
+		* 逐一处理_queue中one_shot_tasks任务,调用其注册的_callback
+	* insert将task加入_timer_tasks,置task.queue为true
+	* free将task加入released_timer_tasks
+	* borrow_task从released_timer_tasks中取出一个task,若有必要,从_timer_tasks移除此task,
+	             取出失败时,返回一个空白task
+	* fire_once新建一个one_shot_task加入_queue
+
+
+percup_timer_task代表一个任务路径,可以随意设置任务内容和执行时间点
+	持有属性
+	    async_worker&, list_member_hook<> * 2 (hook, registrations_hook), percpu_timer_task*, 
+	    state, timer_task*, time_point, bool
+
+timer_task
+	持有属性
+	    list, percpu_timer_task*, mutex&, callback_t, bool
+	* reschedule首先cancel,然后从当前CPU worker里获得一个可重用/新建task绑定this,
+	            重置_active_task,将task加入worker和_registrations
+	* cancel清除_active_task对应的task(影响worker和_registrations)及其本身
+	* fire清除_active_task,执行_callback,置task为RELEASED,清除task(影响worker和_registrations)
+
+serial_timer_task对timer_task做了一些修饰,所有操作都需要持有锁,用于辅助实现timer_task的特殊需求
+	持有bool, int, mutex&, timer_task, waitqueue属性
+	* reschedule调用_task.rescedule
+	* cancel调用_task.cancel
+
+run_later加入一个one_shot_task到当前CPU的worker中
+
+
+# commands
+
+使用了定义于commands.hh的全局域__loader_argc, __loader_argv, __app_cmdline和文件域max_cmdline
+
+使用了定义于commands.cc的全局域osv_cmdline和文件域parsed_cmdline
+
+command
+commands
+	利用boost::spirit::qi::grammar定义了词法分析器
+	* command规则
+		string除' ', ';', '&'外字符组成的串
+		quoted_string以'"'开始和结尾, 中间不包含'"'的串
+		start由string或quoted_string被空格分割,去除末尾';', '&!', '&', eoi得到的集合(?)
+	* commands规则
+		start有command被空格分割得到的集合(?)
+
+parse_command_line解析app命令,可能包含多个子命令,对于runscript <file>格式的子命令,读取<file>内容进行替换处理
+
+getcmdline返回osv_cmdline
+
+loader_parse_cmdline解析loader命令
+	* 输入: str = "[option_value] <app> [arg]"
+	* 输出: argc = len(argv), argv = "[option_value]", app_cmdline = "<app> [arg]"
+
+parse_cmdline将传入的字符串复制osv_cmdline,然后通过loader_parse_cmdline解析到
+             __loader_argc, __loader_argv, __app_cmdline
+
+save_cmdline将(来自app的)newcmd写入`/dev/vblk0`文件512字节处(用于调试?),然后通过parse_cmdline解析
+
+
+# app
+
+使用了定义于app.cc的全局域overide_current_app, optind, __lib_stack_end, application::apps
+
+使用了定义于api/unistd.h的全局域environ
+
+使用了定义于elf.hh的全局域program_base = 0x 1000 0000 0000 UL
+
+launch_error
+invalid_elf_error
+multiple_join_error
+	基本等同于std::runtime_error
+
+app_registry
+	持有list<share_app_t>和mutex属性
+	* join遍历list,逐一对app调用join等待其退出
+	* remove将app从list移除,若app存在
+	* push将app加入list
+
+
+application_runtime
+	持有application&属性
+	* ~application_runtime设置app._terminated为true,唤醒app._joiner
+
+application代表一个可执行的program,拥有独立的ELF namespace(一段8G地址区域)
+	持有属性
+	    pthread_t, elf::program, vector<std::string>, std::string, int, 
+	    bool * 2(_termination_requested, _terminated), mutex, void (_entry_point*)(), 
+	    elf::object * 3 (_lib, _libenviron, _libvdso), main_func_t*, char* [], char [], 
+	    list<function<void()>>, application_runtime, thread*, function<void()>, 
+	    (static)app_registry
+	* join通过pthread_join等待app主线程完成
+	* request_termination将_termination_requested置为true,在当前线程或std::thread新建线程执行callbacks
+	* (static)get_current返回当前线程所属的runtime/app
+	* (static)run创建一个新的app,通过start启动,并加入registry
+		start通过pthread_create创建新的线程执行main
+	* (static)join_all让registry执行join,等待所有app退出
+	* (static)run_and_join创建一个新的app,通过start_and_join在当前线程执行,不加入registry
+		start_and_join在当前线程执行main,执行前后替换和恢复当前线程的(runtime, name)
+	* (static)on_termination_request向当前app加入callback,若_termiation_requested已置为false,则直接执行
+	* (static)unsafe_stop_and_abandon_other_threads遍历所有threads,以unsafe_stop停止与当前线程归属同一
+                                                       app的其他线程
+
+with_all_app_threads遍历所有线程,对与指定线程runtime相同的线程(包括自身)执行指定funtion
+
+on_termination_request即application::on_termination_request
+
+
+# pagecache
+
+使用了定义于pagecache.cc的文件域lru_max_length, lru_free_count, zero_page, 
+cached_page_arc::arc_cache_map, read_cache, write_cache, write_lru, arc_lock, write_lock
+和全局域max_lru_free_count
+
+hashkey持有dev_t, ino_t, off_t属性
+
+arc_hashkey持有unit64_t[]属性
+
+cached_page
+	持有hashkey, void*, ptep_list属性
+	* map向ptep_list加入ptep
+	* unmap从ptep_list移除ptep
+	* flush对ptep_list逐一执行clear_pte
+	* clear_accessed对ptep_list逐一执行clear_accessed
+	* clear_dirty对ptep_list逐一执行clear_dirty
+
+cached_page_write以cached_page为基础
+	持有vnode*, bool属性
+	* writeback通过VOP_WRITE将_page写回
+	* release将_page持有页变为匿名页,_page置为空
+	* mark_dirty标记dirty
+	* flush_check_dirty对ptep_list逐一执行clear_pte,并检查是否有pte为dirty
+
+cached_page_arc以cached_page为基础(几乎只有static方法)
+	持有arc_buf_t*, bool, (static)arc_map(cached_page_arc::arc_cache_map)属性
+		arc_cache_map是允许重复键的特殊哈希表unordered_multimap
+		可能存在多个cache_page_arc实例具有相同的arc_buf_t*
+	* (static)ref向arc_cache_map加入(arc_buf_t*, cached_page_arc*)
+	* (static)unref从arc_cache_map移除(arc_buf_t*, cached_page_arc*)
+	* (static)unmap_arc_buf遍历所有arc_buf_t*对应的cache_page_arc
+		从read_cache中移除所有cache_page_arc*,移除前对每个内部的ptep_list逐一执行clear_pte
+		从arc_cache_map移除所有(arc_buf_t*, cache_page_arc*)
+		若至少处理了一个pte,则mmu::flush_tlb_all
+
+get新增(cache, ptep, pte)联系
+	* 写共享时,内容只存在于write_cache和write_lru
+	* 写私有时,新建一份匿名内存拷贝内容,只在write_cache和write_lru可能存在副本(不计入ptep)
+	* 读可利用写时,私有读标记COW
+	* 读不可利用写时,在无写更新前提下,标记已有的或新建的读为COW
+
+release从write_cache或read_cache中移除ptep,必要时标记dirty或移除cached_page_arc
+
+sync检查write_cache相关的项,清除dirty,并执行writeback
+
+map_arc_buf新建cached_page_arc加入arc_cached_map和read_cache,并执行arc_share_buf
+
+unmap_arc_buf从read_cache移除所有相关的项,并清理ptep_list,必要时执行mmu::flush_tlb_all
+
+access_scanner
+	持有属性double, thread, (static)double * 2(_max_cpu, _min_cpu), unsigned
+	* run周期性的扫描arc_cache_map,找出accessed项,并通过arc_buf_accessed清除,周期
+	     由上次扫描的accessed占比动态调整,但限制在一个范围内
+
+
+# dhcp
+
+使用了定义于dhcp.cc的全局域(单例)net_dhcp_worker, requested_options, ipv4_zero
+
+使用了定义于未知的全局域V_ifnet
+
+dhcp_mbuf关于packet的封包和解包操作
+	持有属性
+	    bool, mbuf*, dhcp_message_type, 
+	    addres_v4 * 5 (_router_ip, _dhcp_server_ip, _subnet_mask, _broadcast_ip, _your_ip), 
+	    vector<address>, u32 * 3 (_lease_time_sec, _renewal_time_sec, _rebind_time_sec), 
+	    u16, string
+	* compose_xxx封包
+	* decode解包
+
+dhcp_socket
+	持有ifnet*属性
+	* dhcp_send直接通过_ifp->if_output传输
+
+dhcp_interface_state状态机
+	持有state, ifnet*, dhcp_socket*, address_v4 * 2(_client_addr, _server_addr), u32属性
+	* discover置状态为DHCP_DISCOVER,发送DISCOVER消息
+	* release置状态为DHCP_INIT,发送RELEASE消息,清空IP, routes, DNS
+	* renew置状态为DHCP_REQUEST,发送RENEW消息
+	* process_packet解包,进行状态转换
+		DHCP_DISCOVER --state_discover--> DHCP_REQEUST
+		DHCP_REQUEST  --state_request---> DHCP_ACKNOWLEDGE/DHCP_INIT
+	* state_discover置状态为DHCP_REQUEST,发送REQUEST消息
+	* state_request收到ACK消息,置状态为DHCP_ACKNOWLEDGE,设置IP, route, DNS
+	               收到NAK消息,置状态为DHCP_INIT,重新discover
+
+dhcp_worker以单例模式提供面向过程API
+	持有thread* * 2 (_dhcp_thread, _waiter), mutex, list, map, bool属性
+	* init为V_ifnet中每个有效项新建一个dhcp_interface_state,加入map,启动_dhcp_thread执行dhcp_worker_fn
+		等待list非空
+		取出一个包通过process_packet处理
+		获取一个IP后,置bool为true,唤醒等待bool的线程
+	* start每个dhcp_interface_state发送DISCOVER消息,等待bool为true
+	* release每个dhcp_interface_state发送RELEASE消息,清除bool
+	* renew每个dhcp_interface_state发送RENEW消息,等待bool为true
+	* queue_packet将数据包放入list,唤醒_dhcp_thread
+
+dhcp_hook_rx通过单例net_dhcp_worker执行queue_packet
+
+dhcp_start通过单例net_dhcp_worker执行init, start
+
+dhcp_release通过单例net_dhcp_worker执行release
+
+dhcp_renew通过单例net_dhcp_worker执行renew
+
+
+# trace
+
+使用了定义于trace.cc全局域trace_buf::invalid_trace_point, (PERCPU)percpu_trace_buffer, trace_enabled, 
+enabled_tracepoint_regexs, tracepoint_base::tp_list
+和文件域global_backtrace_enabled, trace_control_lock, func_trace_nesting, symbol_functions, 
+symbol_func_mutex, symbol_ids
+
+trace_record
+	持有tracepoint_base*, thread*, array<char>, u64, unsigned, bool, u8|long属性
+
+trace_buf
+	持有ptr<char[]>, size_t * 2(_last, _size), (static)tracepoint_base属性
+	* allocate_trace_record从自己持有的内存区域分配一个trace_record
+
+tracepoint_base::probe虽然声明为class,基本是个空壳,仅有hit方法
+
+tracepoint_base
+	持有tracepoint_id, char* 3(name, format, sig), tp_list_link_type,  
+	    bool * 3(_backtrace, _logging, active), rcu_ptr<vector>, mutex, 
+	    (static)list, (static)size_t属性
+	* add_probe向vector添加一个probe,并通知更新
+	* del_probe从vector移除一个probe,并通知更新
+	* run_probe每个probe执行其唯一方法hit
+	* do_log_backtrace通过backtrace_safe获取调用信息，写入buffer
+
+__cyg_profile_func_enter执行trace_function_entry(嵌套调用仅执行一次)
+
+__cyg_profile_func_exit执行trace_function_exit(嵌套调用仅执行一次)
+
+trace::add_symbol_callback向symbol_functions加入function(允许重复function)
+
+trace::remove_symbol_callback从symbol_functions移除function
+
+trace::create_trace_dump将版本信心，ELF program信息，symbol_funcations, trace records写入文件
+

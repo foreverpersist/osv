@@ -43,6 +43,8 @@ namespace osv {
 
 __thread application* override_current_app;
 
+/* 等待registry里所有app(program)退出
+ */
 void app_registry::join() {
     while (true) {
         shared_app_t p;
@@ -61,6 +63,8 @@ void app_registry::join() {
     }
 }
 
+/* 从registry移除app
+ */
 bool app_registry::remove(application* app) {
     bool found = false;
     WITH_LOCK(lock) {
@@ -75,12 +79,16 @@ bool app_registry::remove(application* app) {
     return found;
 }
 
+/* 向registry添加app
+ */
 void app_registry::push(shared_app_t app) {
     WITH_LOCK(lock) {
         apps.push_back(app);
     }
 }
 
+/* 唤醒app的_joiner
+ */
 application_runtime::~application_runtime()
 {
     if (app._joiner) {
@@ -90,6 +98,14 @@ application_runtime::~application_runtime()
 
 app_registry application::apps;
 
+/* 返回当前线程绑定的runtime内关联的app
+   关联关系
+       runtime --bind--> app
+       thread  --bind--> runtime
+       即
+       thread  --bind--> runtime --bind--> app
+   thread与(runtime, app)是多对一的关系
+ */
 shared_app_t application::get_current()
 {
     auto runtime = sched::thread::current()->app_runtime();
@@ -104,6 +120,9 @@ bool application::unsafe_stop_and_abandon_other_threads()
     auto current = sched::thread::current();
     auto current_runtime = current->app_runtime();
     bool success = true;
+    /* 遍历所有threads,根据thread绑定的runtime找出与当前线程归属同一app的线程
+       并通过unsafe_stop停止这些线程
+     */
     // We don't have a list of threads belonging to this app, so need to do
     // it the long slow way, listing all threads...
     sched::with_all_threads([&](sched::thread &t) {
@@ -123,6 +142,8 @@ shared_app_t application::run(const std::vector<std::string>& args)
     return run(args[0], args);
 }
 
+/* 创建一个新的app,通过start启动,并将其加入registry
+ */
 shared_app_t application::run(const std::string& command,
                       const std::vector<std::string>& args,
                       bool new_program,
@@ -137,6 +158,9 @@ shared_app_t application::run(const std::string& command,
     return app;
 }
 
+/* 创建一个新的app,通过start_and_join启动,
+   却不将其加入registry
+ */
 shared_app_t application::run_and_join(const std::string& command,
                       const std::vector<std::string>& args,
                       bool new_program,
@@ -169,6 +193,8 @@ application::application(const std::string& command,
         elf::program *current_program;
 
         if (new_program) {
+            /* 新建一个ELF program,通过putenv设置environ(来自api/unistd.h)中的环境变量
+             */
             this->new_program();
             clone_osv_environ();
             current_program = _program.get();
@@ -178,8 +204,12 @@ application::application(const std::string& command,
             current_program = elf::get_program();
         }
 
+        /* 通过setenv设置env中的环境变量,并处理好运行参数,环境变量,libvdso,PAGE SIZE信息
+         */
         merge_in_environ(new_program, env);
         prepare_argv(current_program);
+        /* 加载可执行文件(.so),但是不立即执行init操作以避免TLS相关的错误?
+         */
         //
         // Some applications (specifically Golang ones) during initialization of it's ELF object
         // invoke init functions that access variables from TLS (Thread Local Storage) memory
@@ -214,6 +244,8 @@ application::application(const std::string& command,
         throw launch_error("Failed to load object: " + command);
     }
 
+    /* 从可执行文件中提取main或者entry_point
+     */
     _main = _lib->lookup<int (int, char**)>(main_function_name.c_str());
     if (!_main) {
         _entry_point = reinterpret_cast<void(*)()>(_lib->entry_point());
@@ -223,6 +255,9 @@ application::application(const std::string& command,
     }
 }
 
+/* 通过pthread_create创建新的线程执行main
+   创建前后,设置和取消override_current_app
+ */
 void application::start()
 {
     // FIXME: we cannot create the thread inside the constructor because
@@ -252,17 +287,25 @@ TRACEPOINT(trace_app_join_ret, "return_code=%d", int);
 
 int application::join()
 {
+    /* 从registry移除此app
+     */
     if (!apps.remove(this)) {
         throw multiple_join_error();
     }
+    /* 通过pthread_join执行真实的join操作
+     */
     trace_app_join(this);
     auto err = pthread_join(_thread, NULL);
     assert(!err);
 
+    /* 设置_joiner为当前线程,清除_runtime(仅清除了引用,未必影响runtime本身?),等待_thread退出
+     */
     _joiner = sched::thread::current();
     _runtime.reset();
     sched::thread::wait_until([&] { return _terminated.load(); });
 
+    /* 清空回调,清除_lib(仅清除了引用,未必影响elf::object本身?)
+     */
     _termination_request_callbacks.clear();
     _lib.reset();
 
@@ -272,6 +315,8 @@ int application::join()
 
 void application::start_and_join(waiter* setup_waiter)
 {
+    /* 暂时替换当前线程的(runtime,name),在当前线程执行main,然后恢复当前线程的(runtime,name)
+     */
     // We start the new application code in the current thread. We temporarily
     // change the app_runtime pointer of this thread, while keeping the old
     // pointer saved and restoring it when the new application ends (keeping
@@ -307,6 +352,9 @@ TRACEPOINT(trace_app_main_ret, "return_code=%d", int);
 
 void application::main()
 {
+    /* 设置_libc_stack_end,初始化lib,设置线程名
+       执行_main -> _post_main或_entry_point
+     */
     __libc_stack_end = __builtin_frame_address(0);
     //
     // Explicitly initialize the application ELF object which would have been
@@ -334,13 +382,20 @@ void application::main()
     // _entry_point() doesn't return
 }
 
+/* 将命令参数拷贝至_argv_buf,以'\0'分隔
+   并将命令参数,environ,libvdso,PASE SIZE信息记录到_argv,以nullptr分隔
+ */
 void application::prepare_argv(elf::program *program)
 {
+    /* 处理可执行文件路径
+     */
     // Prepare program_* variable used by the libc
     char *c_path = (char *)(_command.c_str());
     program_invocation_name = c_path;
     program_invocation_short_name = basename(c_path);
 
+    /* 调整_argv_buf大小 = _args实际大小 + 字符串分隔符大小
+     */
     // Allocate a continuous buffer for arguments: _argv_buf
     // First count the trailing zeroes
     auto sz = _args.size();
@@ -354,6 +409,8 @@ void application::prepare_argv(elf::program *program)
     // Unfortunately, some programs rely on this fact (e.g., libgo's
     // runtime_goenvs_unix()) so it is useful that we do this too.
 
+    /* 统计environ环境变量数目(environ代表的是OS域的环境变量?)
+     */
     // First count the number of environment variables
     int envcount = 0;
     while (environ[envcount]) {
@@ -368,9 +425,14 @@ void application::prepare_argv(elf::program *program)
         WARN_ONCE("application::prepare_argv(): missing libvdso.so -> may prevent shared libraries specifically Golang ones from functioning\n");
     }
 
+    /* 调整_argv大小
+     */
     // Allocate the continuous buffer for argv[] and envp[]
     _argv.reset(new char*[_args.size() + 1 + envcount + 1 + sizeof(Elf64_auxv_t) * (auxv_parameters_count + 1)]);
 
+    /* 将_args中的字符串拷贝至_argv_buf,每个字符串以'\0'分隔
+       同时将_argv_buf中每个字符串的位置添加至contig_argv,最后插入一个nullptr
+     */
     // Fill the argv part of these buffers
     char *ab = _argv_buf.get();
     char **contig_argv = _argv.get();
@@ -383,6 +445,8 @@ void application::prepare_argv(elf::program *program)
     }
     contig_argv[_args.size()] = nullptr;
 
+    /* 将environ中的每个字符串位置添加至contig_argv,最后插入一个nullptr
+     */
     // Do the same for environ
     for (int i = 0; i < envcount; i++) {
         contig_argv[_args.size() + 1 + i] = environ[i];
@@ -390,6 +454,8 @@ void application::prepare_argv(elf::program *program)
     contig_argv[_args.size() + 1 + envcount] = nullptr;
 
 
+    /* 将VDSO库的信息追加至contig_argv
+     */
     // Pass the VDSO library to the application.
     Elf64_auxv_t* _auxv =
         reinterpret_cast<Elf64_auxv_t *>(&contig_argv[_args.size() + 1 + envcount + 1]);
@@ -399,6 +465,8 @@ void application::prepare_argv(elf::program *program)
         _auxv[auxv_idx++].a_un.a_val = reinterpret_cast<uint64_t>(_libvdso->base());
     }
 
+    /* 将PAGE SIZE信息追加至contig_argv,最后加上一个NULL
+     */
     _auxv[auxv_idx].a_type = AT_PAGESZ;
     _auxv[auxv_idx++].a_un.a_val = sysconf(_SC_PAGESIZE);
 
@@ -406,6 +474,8 @@ void application::prepare_argv(elf::program *program)
     _auxv[auxv_idx].a_un.a_val = 0;
 }
 
+/* 执行_main
+ */
 void application::run_main()
 {
     trace_app_main(this, _command.c_str());
@@ -427,6 +497,8 @@ void application::run_main()
 TRACEPOINT(trace_app_termination_callback_added, "app=%p", application*);
 TRACEPOINT(trace_app_termination_callback_fired, "app=%p", application*);
 
+/* 检查是否能立即执行callback,不能则加入当前线程对应app的callbacks中
+ */
 void application::on_termination_request(std::function<void()> callback)
 {
     auto app = get_current();
@@ -445,6 +517,8 @@ TRACEPOINT(trace_app_request_termination_ret, "");
 
 void application::request_termination()
 {
+    /* 将_termination_requested置为true
+     */
     WITH_LOCK(_termination_mutex) {
         trace_app_request_termination(this, _termination_requested);
         if (_termination_requested) {
@@ -454,6 +528,9 @@ void application::request_termination()
         _termination_requested = true;
     }
 
+    /* 若当前线程对应app正是此app,直接在当前线程执行callbacks
+       若不是,通过std::thread(创建主机线程,而非OSv线程?)创建一个新线程执行callbacks,创建前后设置和取消overrid_current_app
+     */
     if (get_current().get() == this) {
         for (auto &callback : _termination_request_callbacks) {
             callback();
@@ -492,6 +569,12 @@ pid_t application::get_main_thread_id() {
 constexpr int max_namespaces = 32;
 std::bitset<max_namespaces> namespaces(1);
 
+/* 分配一个新的地址区域,大小8G
+   地址范围
+       elf::program_base + 0x 0000 0002 0000 0000 ~ ... + 8G
+       ...
+       elf::program_base + 0x 0000 0040 0000 0000 ~ ... + 8G
+ */
 void application::new_program()
 {
     for (unsigned long i = 0; i < max_namespaces; ++i) {
@@ -515,7 +598,8 @@ elf::program *application::program() {
     return _program.get();
 }
 
-
+/* 通过putenv设置environ(来自api/unstd.h)中的环境变量
+ */
 void application::clone_osv_environ()
 {
     _libenviron = _program->get_library("libenviron.so");
@@ -537,6 +621,10 @@ void application::clone_osv_environ()
     }
 }
 
+/* 通过setenv设置环境变量
+   非newprogram - setenv来自OSv libc
+   newprogram - setenv来自当前app的_libenviron
+ */
 void application::set_environ(const std::string &key, const std::string &value,
                               bool new_program)
 {
@@ -556,6 +644,8 @@ void application::set_environ(const std::string &key, const std::string &value,
     my_setenv(key.c_str(), value.c_str(), 1);
 }
 
+/* 通过set_environ设置env中的环境变量
+ */
 void application::merge_in_environ(bool new_program,
         const std::unordered_map<std::string, std::string> *env)
 {
@@ -568,6 +658,8 @@ void application::merge_in_environ(bool new_program,
     }
 }
 
+/* 遍历所有threads,对runtime与th1相同的thread执行f()
+ */
 void with_all_app_threads(std::function<void(sched::thread &)> f, sched::thread& th1) {
     sched::with_all_threads([&](sched::thread &th2) {
         if (th2.app_runtime() == th1.app_runtime()) {

@@ -65,6 +65,8 @@ TRACEPOINT(trace_poll_err, "%d", int);
 
 using namespace std;
 
+/* 只取POLLIN, POLLOUT, POLLRDNORM, POLL WRNORM这些events
+ */
 int poll_no_poll(int events)
 {
      // Return ready for read/write.
@@ -90,6 +92,8 @@ void poll_drain(struct file* fp)
     FD_UNLOCK(fp);
 }
 
+/* 过滤每个fp上的无效events,并统计events总数
+ */
 /*
  * Iterate all file descriptors and search for existing events,
  * Fill-in the revents for each fd in the poll.
@@ -113,6 +117,8 @@ int poll_scan(std::vector<poll_file>& _pfd)
             continue;
         }
 
+        /* 调用poll_no_poll过滤无效events
+         */
         entry->revents = fp->poll(entry->events | (POLLSTANDARD & ~POLL_REQUESTABLE));
 
         if (entry->revents) {
@@ -130,6 +136,8 @@ int poll_scan(std::vector<poll_file>& _pfd)
     return nr_events;
 }
 
+/* 唤醒fp上的epoll和所有的与events相关的pollreq
+ */
 /*
  * Signal the file descriptor with changed events
  * This function is invoked when the file descriptor is changed.
@@ -141,8 +149,12 @@ int poll_wake(struct file* fp, int events)
 
     trace_poll_wake(fp, events);
 
+    /* 增加引用计数
+     */
     fhold(fp);
 
+    /* 唤醒fp->f_epolls
+     */
     fp->wake_epoll(events);
 
     FD_LOCK(fp);
@@ -158,11 +170,15 @@ int poll_wake(struct file* fp, int events)
     }
 
     FD_UNLOCK(fp);
+    /* 减少引用计数
+     */
     fdrop(fp);
 
     return 0;
 }
 
+/* 将pollreq关联到自身内部每个fp上,以便任何一个fp发生events都可唤醒pollreq
+ */
 /*
   * Add a pollreq reference to all file descriptors that participate
   * The reference is added via struct poll_link
@@ -210,6 +226,8 @@ void poll_install(struct pollreq* p)
     }
 }
 
+/* 解除pollreq内部每个fp对于pollreq的关联
+ */
 void poll_uninstall(struct pollreq* p)
 {
     unsigned i;
@@ -239,6 +257,8 @@ void poll_uninstall(struct pollreq* p)
     } /* End of clearing pollreq references from the other fds */
 }
 
+/* 先检查pollreq是否可以直接响应,若不可则等待唤醒或超时
+ */
 int do_poll(std::vector<poll_file>& pfd, file::timeout_t _timeout)
 {
     int nr_events;

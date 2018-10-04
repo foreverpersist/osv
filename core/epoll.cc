@@ -108,6 +108,8 @@ public:
             } catch (std::out_of_range &e) {
                 return ENOENT;
             }
+            /* 此处难道不是一定存在?
+             */
             fp->epoll_add({ this, key });
         }
         if (fp->poll(events_epoll_to_poll(event->events))) {
@@ -138,6 +140,8 @@ public:
             while (!tmr.expired() && nr == 0) {
                 if (tmo) {
                     _activity_ring_owner.reset(*sched::thread::current());
+                    /* 等待任何一个条件满足
+                     */
                     sched::thread::wait_for(_activity_lock,
                             _waiters,
                             tmr,
@@ -148,6 +152,8 @@ public:
                     _activity_ring_owner.clear();
                 }
 
+                /* 将待处理的key都移动/复制到_activity
+                 */
                 flush_activity_ring();
                 // We need to drop _activity_lock and take f_lock in process_activity(),
                 // so move _activity to local storage for processing.
@@ -156,6 +162,9 @@ public:
                 DROP_LOCK(_activity_lock) {
                     nr = process_activity(activity, events, maxevents);
                 }
+                /* 可能有新的_activity内容在process_activity时被添加
+                   将activity中剩余的key重新追加到可能已修改的_activity中
+                 */
                 // move back !EPOLLET back to main storage
                 if (_activity.empty()) {
                     // nothing happened, move entire set back in
@@ -181,16 +190,28 @@ public:
                 epoll_key key = *i;
                 auto found = map.find(key);
                 auto cur = i++;
+                /* epoll_event不存在,从activity移除key
+                 */
                 if (found == map.end()) {
                     activity.erase(cur);
                     continue; // raced
                 }
                 epoll_event& evt = found->second;
                 int active = 0;
+                /* 过滤无效events
+                 */
                 if (evt.events) {
                     active = key._file->poll(events_epoll_to_poll(evt.events));
                 }
+                /* 转换位epoll events
+                 */
                 active = events_poll_to_epoll(active);
+                /* 无events或设置EPOLLET边缘触发时,从activity移除
+                   否则会重新添加到f_epolls
+                   f_epolls机制?
+                       无events - f_epolls中依然存在(this, key)
+                       有events - f_epolls中已经移除(this, key)
+                 */
                 if (!active || (evt.events & EPOLLET)) {
                     activity.erase(cur);
                 } else {
@@ -199,6 +220,8 @@ public:
                 if (!active) {
                     continue;
                 }
+                /* 设置EPOLLONESHOT,从f_epolls移除
+                 */
                 if (evt.events & EPOLLONESHOT) {
                     evt.events = 0;
                     key._file->epoll_del({ this, key });
@@ -213,26 +236,37 @@ public:
     }
     void flush_activity_ring() {
         epoll_key ep;
+        /* 将_activity_ring内容移动到_activity
+         */
         while (_activity_ring.pop(ep)) {
             _activity.insert(ep);
         }
         if (_activity_ring_overflow.load(std::memory_order_relaxed)) {
             _activity_ring_overflow.store(false, std::memory_order_relaxed);
+            /* 将map中的key复制到_activity
+               可能会存在许多重复的key,_activity在添加时会去重,但依然有多余遍历
+             */
             for (auto&& x : map) {
                 _activity.insert(x.first);
             }
         }
+        /* 唤醒所有waiters
+         */
         // events on _activity_ring only wake up one waiter, so wake up all the rest  now.
         // we need to do this even if no events were received, since if we exit, then
         // _activity_ring_owner will remain unset.
         _waiters.wake_all(_activity_lock);
     }
     void wake(epoll_key key) {
+        /* 加入_activity_ring,唤醒_activity_ring_owner持有的线程(由wait绑定)
+         */
         if (_activity_ring.push(key)) {
             _activity_ring_owner.wake();
             return;
         }
         WITH_LOCK(_activity_lock) {
+            /* 加入_activity,唤醒所有waiters
+             */
             auto ins = _activity.insert(key);
             if (ins.second) {
                 _waiters.wake_all(_activity_lock);
@@ -240,9 +274,13 @@ public:
         }
     }
     void wake_in_rcu(epoll_key key) {
+        /* 加入_activity_ring失败则置位_activity_ring_overflow为true
+         */
         if (!_activity_ring.push(key)) {
             _activity_ring_overflow.store(true, std::memory_order_relaxed);
         }
+        /* 唤醒_activity_ring_owner
+         */
         _activity_ring_owner.wake();
     }
 };
@@ -260,6 +298,9 @@ int epoll_create1(int flags)
     flags &= ~EPOLL_CLOEXEC;
     assert(!flags);
     try {
+        /* 创建epoll_file,并为其分配fd
+           fd只是临时的?
+         */
         fileref f = make_file<epoll_file>();
         fdesc fd(f);
         trace_epoll_create(fd.get());

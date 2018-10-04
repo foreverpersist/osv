@@ -28,6 +28,11 @@ namespace osv {
 
 typedef std::string::const_iterator sciter;
 
+/* 定义了词法分析器的几个规则
+   string - 非' ', ';', '&'字符组成的串 
+   quoted_string - 由'"'包裹的串
+   start - string或quoted_string以空格分割,去除末尾';', '&!', '&' 
+ */
 struct command : qi::grammar<sciter,
                              std::vector<std::string>(),
                              ascii::space_type>
@@ -53,6 +58,9 @@ struct command : qi::grammar<sciter,
     qi::symbols<char const, char const> unesc_char;
 };
 
+/* 在command的基础上定义了词法规则
+   start - command被空格分割
+ */
 struct commands : qi::grammar<sciter,
                               std::vector<std::vector<std::string> >(),
                               ascii::space_type>
@@ -79,6 +87,8 @@ parse_command_line_min(const std::string line, bool &ok)
         return result;
     }
 
+    /* 直接使用commands解析,得到分割好的字符串集合
+     */
     commands g;
     sciter iter = std::begin(line);
     sciter end = std::end(line);
@@ -91,6 +101,9 @@ parse_command_line_min(const std::string line, bool &ok)
     return result;
 }
 
+/* 使用真实值替换环境变量
+   word格式应当是: ...$NAME
+ */
 /*
 Everything after first $ is assumed to be env var.
 So with AA=aa, "$AA" -> "aa", and "X$AA" => "Xaa"
@@ -111,6 +124,8 @@ void expand_environ_vars(std::string& word)
     }
 }
 
+/* 替换result中所有环境变量
+ */
 /*
 Expand environ vars in each word.
 */
@@ -125,6 +140,10 @@ void expand_environ_vars(std::vector<std::vector<std::string>>& result)
     }
 }
 
+/* 处理一行命令中options(实际只识别-env一种)
+   要求result每项格式: [option_value] [value]
+   (带option选项必须在前)
+ */
 /*
 In each runscript line, first N args starting with - are options.
 Parse options and remove them from result.
@@ -213,6 +232,9 @@ static void runscript_process_options(std::vector<std::vector<std::string> >& re
     }
 }
 
+/* 处理一个脚本文件中的每一行
+   cmd格式: runscript <file>
+ */
 /*
 If cmd starts with "runscript file", read content of file and
 return vector of all programs to be run.
@@ -246,19 +268,29 @@ runscript_expand(const std::vector<std::string>& cmd, bool &ok, bool &is_runscri
         std::string line;
         size_t line_num = 0;
         while (!in.eof()) {
+            /* 逐行处理
+             */
             getline(in, line);
             bool ok2;
+            /* 解析此行的此法元素
+             */
             result3 = parse_command_line_min(line, ok2);
             debug("runscript expand fn='%s' line=%d '%s'\n", fn.c_str(), line_num, line.c_str());
+            /* 遇到非法行,直接放弃整个脚本
+             */
             if (ok2 == false) {
                 printf("Failed expanding runscript file='%s' line=%d '%s'.\n", fn.c_str(), line_num, line.c_str());
                 result2.clear();
                 ok = false;
                 return result2;
             }
+            /* 处理此行options部分,设置相应环境变量,只处理-env选项,忽略其他选项
+             */
             // Replace env vars found inside script.
             // process and remove options from command
             runscript_process_options(result3);
+            /* 处理非option部分,进行环境变量替换
+             */
             // Options, script command and script command parameters can be set via env vars.
             // Do this later than runscript_process_options, so that
             // runscript with content "--env=PORT?=1111 /usr/lib/mpi_hello.so aaa $PORT ccc"
@@ -277,11 +309,16 @@ runscript_expand(const std::vector<std::string>& cmd, bool &ok, bool &is_runscri
 std::vector<std::vector<std::string>>
 parse_command_line(const std::string line,  bool &ok)
 {
+    /* 先处理一次,替换环境变量
+       line中可能包含多个子命令
+     */
     std::vector<std::vector<std::string> > result, result2;
     result = parse_command_line_min(line, ok);
     // First replace environ variables in input command line.
     expand_environ_vars(result);
 
+    /* 对于runscript <file>格式的子命令,展开文件内容并进行处理
+     */
     /*
     If command starts with runscript, we need to read actual command to
     execute from the given file.
@@ -319,6 +356,14 @@ std::string getcmdline()
 }
 
 #define MY_DEBUG(args...) if(0) printf(args)
+/* 解析OSv命令行
+   Input
+       [option_value] <app> [arg]
+   Output
+       argc = len(argv)
+       argv = "[option value]"
+       app_cmdline = "<app> [arg]"
+ */
 /*
 loader_parse_cmdline accepts input str - OSv commandline, say:
 --env=AA=aa --env=BB=bb1\ bb2 app.so arg1 arg2
@@ -365,6 +410,8 @@ void loader_parse_cmdline(char* str, int *pargc, char*** pargv, char** app_cmdli
         // Otherwise, it is application command.
         char *ch = str;
         while (ch && *ch != '\0') {
+            /* 跳过空白字符
+             */
             if (strchr(delim, *ch)) {
                 ch++;
                 continue;
@@ -438,6 +485,13 @@ void loader_parse_cmdline(char* str, int *pargc, char*** pargv, char** app_cmdli
 }
 #undef MY_DEBUG
 
+/* 调用loader_parse_cmdline
+   Input - osv_cmdline(p)
+   Output
+       argc - __loader_argc
+       argv - __loader_argv
+       app_cmdline - __app_cmdline
+ */
 int parse_cmdline(const char *p)
 {
     if (__loader_argv) {
@@ -459,6 +513,9 @@ int parse_cmdline(const char *p)
     return 0;
 }
 
+/* 将newcmd写入/dev/vblk0中第512字节处保存(为了调试?)
+   然后调用parse_cmdline解析
+ */
 void save_cmdline(std::string newcmd)
 {
     if (newcmd.size() >= max_cmdline) {

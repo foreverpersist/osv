@@ -110,6 +110,9 @@ public:
             assert(!task.queued);
 
             if (_timer_tasks.insert(task)) {
+                /* 当前task的timestamp比_timer_tasks原先时间戳更靠前
+                   重置_timer时间戳
+                 */
                 rearm(task.get_timeout());
             }
 
@@ -120,14 +123,22 @@ public:
     // May be called from any CPU
     void free(percpu_timer_task& task)
     {
+        /* 将task放入released_timer_tasks
+         */
         released_timer_tasks.push(&task);
     }
 
     percpu_timer_task& borrow_task()
     {
         WITH_LOCK(preempt_lock) {
+            /* 从released_timer_task取出一个task
+             */
             auto task = released_timer_tasks.pop();
             if (task) {
+                /* 从_timer_tasks中移除
+                   task可以同时存在于released_timer_tasks与_timer_tasks吗?
+                   难道是已完成的任务重新加入当前CPU中,不会清除released_timer_tasks?
+                 */
                 if (task->queued) {
                     remove_locked(*task);
                 }
@@ -140,6 +151,9 @@ public:
 
     void fire_once(callback_t&& callback)
     {
+        /* 新建一个one_shot_task加入_queue,
+           加入前_queue为空,则唤醒_thread
+         */
         auto task = new one_shot_task(std::move(callback));
 
         WITH_LOCK(preempt_lock) {
@@ -155,6 +169,8 @@ public:
         trace_async_worker_started(this);
 
         for (;;) {
+            /* 等待_timer设定的时间到达或_queue非空
+             */
             sched::thread::wait_until([&] {
                 assert(!sched::preemptable());
                 return _timer.expired() || !_queue.empty();
@@ -163,12 +179,17 @@ public:
             WITH_LOCK(preempt_lock) {
                 _timer.cancel();
 
+                /* 让_timer_task中now之前的tasks过期
+                   对于每一个非RELEASED状态的task,执行fire
+                 */
                 auto now = clock::now();
                 _timer_tasks.expire(now);
                 percpu_timer_task* task;
                 while ((task = _timer_tasks.pop_expired())) {
                     mark_removed(*task);
 
+                    /* 此处会出现RELEASED状态的task吗?
+                     */
                     if (task->_state.load(std::memory_order_relaxed) !=
                             percpu_timer_task::state::RELEASED)
                     {
@@ -178,8 +199,13 @@ public:
                     }
                 }
 
+                /* 重新设置_timer
+                 */
                 rearm(_timer_tasks.get_next_timeout());
 
+                /* 逐一处理_queue中的one_shot_task
+                   调用_callback后直接删除task
+                 */
                 while (!_queue.empty()) {
                     auto& task = *_queue.begin();
                     _queue.pop_front();
@@ -215,6 +241,8 @@ private:
 
     void fire(percpu_timer_task& task)
     {
+        /* 设置task状态位FIRING,并让task内部的timer_task执行真实的fire
+         */
         auto old = percpu_timer_task::state::ACTIVE;
         if (!task._state.compare_exchange_strong(
             old, percpu_timer_task::state::FIRING, std::memory_order_relaxed))
@@ -305,11 +333,15 @@ bool timer_task::reschedule(clock::time_point time_point)
 
         trace_async_timer_task_reschedule(this, &_worker, time_point.time_since_epoch().count());
 
+        /* 从当前CPU的worker中取出一个空闲的percpu_timer_task,绑定this
+         */
         auto& task = _worker.borrow_task();
         task.fire_at = time_point;
         task.master = this;
         task._state.store(percpu_timer_task::state::ACTIVE, std::memory_order_relaxed);
 
+        /* 重置_active_task, 将percpu_timer_task加入_registrations,同时加入当前CPU的worker
+         */
         _active_task = &task;
         _registrations.push_front(task);
         _worker.insert(task);
@@ -320,6 +352,9 @@ bool timer_task::reschedule(clock::time_point time_point)
 
 void timer_task::free_registration(percpu_timer_task& task)
 {
+    /* 从_registration和task绑定的CPU worker上移除task
+       _registrations为空时,唤醒_registration_drained
+     */
     _registrations.erase(_registrations.iterator_to(task));
     if (_registrations.empty()) {
         _registrations_drained.wake_all(_mutex);
@@ -338,6 +373,8 @@ bool timer_task::cancel()
         return false;
     }
 
+    /* 清除_active_task对应的task及其本身
+     */
     auto old = percpu_timer_task::state::ACTIVE;
     if (_active_task->_state.compare_exchange_strong(old,
         percpu_timer_task::state::RELEASED, std::memory_order_relaxed))
@@ -353,15 +390,21 @@ void timer_task::fire(percpu_timer_task& task)
 {
     WITH_LOCK(_mutex) {
         if (_active_task != &task) {
+            /* _active_task与task不一致应该是一种罕见的异常情况(Error)
+             */
             trace_async_timer_task_misfire(this, &task);
         } else {
             trace_async_timer_task_fire(this, &task);
+            /* 清空_active_task,执行_callback
+             */
             _active_task = nullptr;
             DROP_LOCK(_mutex) {
                 _callback();
             }
         }
 
+        /* 置task状态为RELEASED,清除task
+         */
         task._state.store(percpu_timer_task::state::RELEASED, std::memory_order_relaxed);
         free_registration(task);
     }
@@ -449,6 +492,8 @@ bool serial_timer_task::try_fire()
     return true;
 }
 
+/* 加入一个one_shot_task到当前CPU的worker中
+ */
 void run_later(callback_t&& callback)
 {
     WITH_LOCK(migration_lock) {

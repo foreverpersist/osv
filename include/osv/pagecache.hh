@@ -9,6 +9,8 @@
 #include <osv/vfs_file.hh>
 #include <osv/mmu.hh>
 
+/* 与ZFS紧密关联的数据结构
+ */
 struct arc_buf;
 typedef arc_buf arc_buf_t;
 

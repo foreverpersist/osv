@@ -27,6 +27,8 @@ namespace rcu {
 
 mutex mtx;
 
+/* 使用array[2]作交换区,buf指示有效部分,每次使用后交换有效区和无效区
+ */
 struct rcu_defer_queue {
     int buf; // double-buffer: 0 or 1
     std::array<std::function<void ()>, 2000> callbacks[2];
@@ -57,6 +59,8 @@ std::vector<cpu_quiescent_state_thread*> cpu_quiescent_state_threads;
 static PERCPU(sched::thread_handle, percpu_quiescent_state_thread);
 static PERCPU(wait_record*, percpu_waiting_defers);
 
+/* 在何处使用?
+ */
 // FIXME: hot-remove cpus
 // FIXME: locking for the vector
 sched::cpu::notifier cpu_notifier([] {
@@ -119,11 +123,15 @@ void cpu_quiescent_state_thread::do_work()
     while (true) {
         bool toclean = false;
         WITH_LOCK(preempt_lock) {
+            /* 将当前CPU上的percpu_callbacks->ncallbacks反转0 <-> 1
+             */
             auto p = &*percpu_callbacks;
             if (p->ncallbacks[p->buf]) {
                 toclean = true;
                 p->buf = !p->buf;
             }
+            /* 唤醒当前CPU上的所有wait records,并清空percpu_waiting_defers
+             */
             // If an rcu_defer() is waiting for buffer room, let it know.
             auto q = *percpu_waiting_defers;
             while (q) {
@@ -134,6 +142,8 @@ void cpu_quiescent_state_thread::do_work()
             *percpu_waiting_defers = nullptr;
         }
         if (toclean) {
+            /* fetch_add返回旧值,即g = next_generation + 1
+             */
             auto g = next_generation.fetch_add(1, std::memory_order_relaxed) + 1;
             _requested.store(true, std::memory_order_relaxed);
             // copy cpu_quiescent_state_threads to prevent a hotplugged cpu
@@ -141,11 +151,15 @@ void cpu_quiescent_state_thread::do_work()
             // and the number of cpus we wait on
             // FIXME: better locking
             auto cqsts = cpu_quiescent_state_threads;
+            /* 除当前线程外所有线程均request下一个generation
+             */
             for (auto cqst : cqsts) {
                 if (cqst != this) {
                     cqst->request(g);
                 }
             }
+            /* 直接设置当前线程generation,唤醒其他线程
+             */
             set_generation(g);
             // Wait until desired generation g is reached, but while waiting
             // also service generation requests from other cpus' threads.
@@ -155,6 +169,8 @@ void cpu_quiescent_state_thread::do_work()
                                 _request.load(std::memory_order_relaxed))
                              || all_at_generation(cqsts, g)); });
                 auto r = _request.load(std::memory_order_relaxed);
+                /* 可能其他线程又更新了generation,需要再次设置
+                 */
                 if (_generation.load(std::memory_order_relaxed) < r) {
                     set_generation(r);
                 } else {
@@ -216,6 +232,9 @@ void rcu_defer(std::function<void ()>&& func)
     }
 }
 
+/* 通过等待信号量增加来等待generation同步完成
+   rcu_flush同理
+ */
 void rcu_synchronize()
 {
     semaphore s{0};

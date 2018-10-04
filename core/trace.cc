@@ -66,6 +66,8 @@ struct trace_buf {
     size_t _last;
     size_t _size;
 
+    /* _size必须是trace_page_size的倍数，表示_base开始的空间大小
+     */
     trace_buf() :
             _base(nullptr), _last(0), _size(0) {
     }
@@ -96,11 +98,19 @@ struct trace_buf {
     }
 
     trace_record * allocate_trace_record(size_t size) {
+        /* size为传入基础值加上trace_record大小后的对齐值，不会超过trace_page_size
+         */
         size += sizeof(trace_record);
         size = align_up(size, sizeof(long));
         assert(size <= trace_page_size);
         size_t p = _last;
         size_t pn = p + size;
+        /* 检查是否在同一段trace_page_size区间，不允许record跨区间
+           出现跨区间时，重新选择下个边界点为新起点
+            同一区间           跨区间
+           |  .  .  |    |  .    |   .   |
+              p  pn         p        pn
+         */
         if (align_down(p, trace_page_size) != align_down(pn - 1, trace_page_size)) {
             // crossed page boundary
             pn = align_up(p, trace_page_size) + size;
@@ -120,6 +130,8 @@ struct trace_buf {
 
     }
 private:
+    /* index取值在[0, _size-1]之间，返回值为s对_size取模
+     */
     inline size_t index(size_t s) const {
         return s & (_size - 1);
     }
@@ -142,6 +154,8 @@ void enable_trace()
     trace_enabled = true;
 }
 
+/* 初始化percpu_trace_buffer
+ */
 void ensure_log_initialized()
 {
     static std::mutex _mutex;
@@ -156,8 +170,13 @@ void ensure_log_initialized()
             return;
         }
 
+        /* ilog2_roundup返回(n-1)第一个非0位索引
+           ncpu为cpu数目相对于2的幂次向上取整, 如: 3 -> 4, 4 -> 4
+         */
         // Ensure we're using power of two sizes * trace_page_size, so round num cpus to ^2
         const size_t ncpu = 1 << size_t(ilog2_roundup(sched::cpus.size()));
+        /* 每个CPU上至多256个trace_page_size
+         */
         // TODO: examine these defaults. I'm guessing less than 256*mt sized buffers
         // will be subpar, so even if it bloats us on >4 vcpu lets do this for now.
         const size_t size = trace_page_size * std::max(size_t(256), 1024 / ncpu);
@@ -170,6 +189,8 @@ void ensure_log_initialized()
     }
 }
 
+/* 通知trace加入新的正则，并将正则加入enabled_tracepoint_regexs
+ */
 void enable_tracepoint(std::string wildcard)
 {
     wildcard = boost::algorithm::replace_all_copy(wildcard, std::string("*"), std::string(".*"));
@@ -179,6 +200,8 @@ void enable_tracepoint(std::string wildcard)
     enabled_tracepoint_regexs.push_back(re);
 }
 
+/* 设置global_backtrace_enabled和tp_list每一项的backtrace
+ */
 void enable_backtraces(bool backtrace) {
     global_backtrace_enabled = backtrace;
     for (auto& tp : tracepoint_base::tp_list) {
@@ -188,6 +211,8 @@ void enable_backtraces(bool backtrace) {
 
 namespace std {
 
+/* tracepoint_id的哈希算法
+ */
 template<>
 struct hash<tracepoint_id> {
     size_t operator()(const tracepoint_id& id) const {
@@ -199,6 +224,8 @@ struct hash<tracepoint_id> {
 
 }
 
+/* 常规初始化，加入唯一id,将实例本身加入tp_list
+ */
 tracepoint_base::tracepoint_base(unsigned _id, const std::type_info& tp_type,
                                  const char* _name, const char* _format)
     : id{&tp_type, _id}, name(_name), format(_format)
@@ -222,6 +249,8 @@ tracepoint_base::~tracepoint_base()
 
 static lockfree::mutex trace_control_lock;
 
+/* 设置_logging，通知update
+ */
 void tracepoint_base::enable(bool enable)
 {
     if (enable) {
@@ -239,6 +268,8 @@ void tracepoint_base::backtrace(bool enable)
     _backtrace = enable;
 }
 
+/* _logging和probes改变时，进行合适的activate/deactivate切换
+ */
 void tracepoint_base::update()
 {
     // take this here as well, just to ensure we're
@@ -262,6 +293,8 @@ void tracepoint_base::update()
     }
 }
 
+/* 从tracepoint_patch_size中找到tracepoint_base，执行activate
+ */
 void tracepoint_base::activate()
 {
     active = true;
@@ -272,6 +305,8 @@ void tracepoint_base::activate()
     }
 }
 
+/* 从tracepoint_patch_size中找到tracepoint_base，执行deactivate
+ */
 void tracepoint_base::deactivate()
 {
     active = false;
@@ -282,6 +317,8 @@ void tracepoint_base::deactivate()
     }
 }
 
+/* 每个probe执行其唯一方法hit
+ */
 void tracepoint_base::run_probes() {
     WITH_LOCK(osv::rcu_read_lock) {
         auto &probes = *probes_ptr.read();
@@ -329,6 +366,9 @@ void tracepoint_base::del_probe(probe* p)
     update();
 }
 
+/* 使用方法内部的static变量
+   为何不直接声明为一个static属性?
+ */
 std::unordered_set<tracepoint_id>& tracepoint_base::known_ids()
 {
     // since tracepoints are constructed in global scope, use
@@ -339,6 +379,8 @@ std::unordered_set<tracepoint_id>& tracepoint_base::known_ids()
     return _known_ids;
 }
 
+/* 通过backtrace_safe取得调用栈，不足backtrace_len用nullptr补足
+ */
 void tracepoint_base::do_log_backtrace(trace_record* tr, u8*& buffer)
 {
     assert(tr->backtrace);
@@ -348,6 +390,8 @@ void tracepoint_base::do_log_backtrace(trace_record* tr, u8*& buffer)
     buffer += backtrace_len * sizeof(void*);
 }
 
+/* 从percpu_trace_buffer中分配一个trace_record
+ */
 trace_record* tracepoint_base::allocate_trace_record(size_t size)
 {
     const bool bt = _backtrace;
@@ -406,6 +450,8 @@ trace::event_info::event_info(const tracepoint_base & tp)
     , backtrace(tp.backtrace())
 {}
 
+/* 返回tp_list中所有tracepoint_base
+ */
 std::vector<trace::event_info>
 trace::get_event_info()
 {
@@ -421,6 +467,8 @@ trace::get_event_info()
     return res;
 }
 
+/* 返回tp_list中匹配正则的tracepoint_base
+ */
 std::vector<trace::event_info>
 trace::get_event_info(const std::regex & ex)
 {
@@ -437,6 +485,8 @@ trace::get_event_info(const std::regex & ex)
     return res;
 }
 
+/* 返回匹配正则的tracepoint_base，并更新他们的enable, backtrace状态
+ */
 std::vector<trace::event_info>
 trace::set_event_state(const std::regex & ex, bool enable, bool backtrace) {
     std::vector<event_info> res;
@@ -456,6 +506,8 @@ trace::set_event_state(const std::regex & ex, bool enable, bool backtrace) {
     return res;
 }
 
+/* 与上述类似的，针对单个tracepoint_base的操作
+ */
 trace::event_info
 trace::get_event_info(const ext_id & id)
 {
@@ -498,6 +550,8 @@ static std::unordered_map<trace::generator_id, trace::generate_symbol_table_func
 static std::mutex symbol_func_mutex;
 static trace::generator_id symbol_ids;
 
+/* 将function加入symbol_functions，允许重复加入
+ */
 trace::generator_id
 trace::add_symbol_callback(const generate_symbol_table_func & f) {
     WITH_LOCK(symbol_func_mutex) {
@@ -507,6 +561,8 @@ trace::add_symbol_callback(const generate_symbol_table_func & f) {
     }
 }
 
+/* 将指定id的function从symbol_functions移除，可能存在其他id的相同function
+ */
 void
 trace::remove_symbol_callback(generator_id id) {
     WITH_LOCK(symbol_func_mutex) {
@@ -516,6 +572,8 @@ trace::remove_symbol_callback(generator_id id) {
     }
 }
 
+/* 将序列化的数据写入[tmp]文件
+ */
 // Helper type to build trace dump binary files
 class trace_out: public std::ofstream {
 public:
@@ -579,6 +637,9 @@ public:
     }
 };
 
+/* 初始化时写入T() - 占位
+   析构时写入value - 更新
+ */
 template<typename T = uint32_t>
 struct length {
 public:
@@ -699,6 +760,8 @@ trace::create_trace_dump()
     semaphore signal(0);
     std::vector<trace_buf> copies;
 
+    /* 检查tracepoint_base是否存在于tp_list的方法
+     */
     auto is_valid_tracepoint = [](const tracepoint_base * tp_test) {
         for (auto & tp : tracepoint_base::tp_list) {
             if (&tp == tp_test) {
@@ -708,6 +771,8 @@ trace::create_trace_dump()
         return false;
     };
 
+    /* 串行执行多线程(每个CPU一个)，复制percpu_trace_buffer
+     */
     // Copy the trace buffers from each cpu, locking out trace generation
     // during the extraction (disable preemption, just like trace write)
     unsigned i = 0;
@@ -728,6 +793,8 @@ trace::create_trace_dump()
     // Redundant. But just to verify.
     signal.wait(sched::cpus.size());
 
+    /* 将一个长度为4的字符串转为uint32_t,每8位对应一个字符
+     */
     // Dealing with 'FOUR' fourcc tags
     struct tag {
         tag(const char (&s)[5]) :
@@ -739,6 +806,8 @@ trace::create_trace_dump()
         const uint32_t _val;
     };
 
+    /* 类似length，先占位，最后更新
+     */
     // RIFF-like chunk (see file format description).
     // Always aligned on 8
     class chunk {
@@ -771,10 +840,14 @@ trace::create_trace_dump()
     out.exceptions(trace_out::failbit);
 
     {
+        /* 写入版本信息
+         */
         chunk osvt(out, "OSVT"); // magic
         out.write(uint32_t(1)); // endian (verify)
         out.write(uint32_t((tf_version_major << 16) | tf_version_minor)); // version
 
+        /* 写入所有tracepoint_base信息
+         */
         // Trace dictionary
         {
             chunk dict(out, "TRCD");
@@ -799,6 +872,8 @@ trace::create_trace_dump()
             }
         }
 
+        /* 写入当前ELF program的modules信息(sections, symbols, ...)
+         */
         { // Module list
             elf::get_program()->with_modules(
                     [&](const elf::program::modules_list &ml)
@@ -884,6 +959,8 @@ trace::create_trace_dump()
         }
 
 
+        /* 写入symbol_functions
+         */
         {
             // Symbol tables
             WITH_LOCK(symbol_func_mutex) {

@@ -43,6 +43,8 @@ u8 requested_options[] = {
 
 const ip::address_v4 ipv4_zero = ip::address_v4::address_v4::from_string("0.0.0.0");
 
+/* 通过单例net_dhcp_worker实现面向过程API
+ */
 // Returns whether we hooked the packet
 int dhcp_hook_rx(struct mbuf* m)
 {
@@ -154,6 +156,8 @@ namespace dhcp {
         _m = m;
     }
 
+    /* 基本的合法性检查
+     */
     bool dhcp_mbuf::is_valid_dhcp()
     {
         decode_ip_len();
@@ -542,6 +546,8 @@ namespace dhcp {
         delete _sock;
     }
 
+    /* 发送DISCOVER消息
+     */
     void dhcp_interface_state::discover()
     {
         // Update state
@@ -558,6 +564,8 @@ namespace dhcp {
         _sock->dhcp_send(dm);
     }
 
+    /* 发送RELEASE消息,清空IP, routes, DNS
+     */
     void dhcp_interface_state::release()
     {
         // Update state
@@ -581,6 +589,8 @@ namespace dhcp {
         _client_addr = _server_addr = ipv4_zero;
     }
 
+    /* 发送RENEW消息
+     */
     void dhcp_interface_state::renew()
     {
         // Update state
@@ -607,6 +617,8 @@ namespace dhcp {
         _sock->dhcp_send(dm);
     }
 
+    /* 解包,改变状态
+     */
     void dhcp_interface_state::process_packet(struct mbuf* m)
     {
         dhcp_mbuf dm(true, m);
@@ -635,6 +647,8 @@ namespace dhcp {
 
     }
 
+    /* 发送REQUEST消息
+     */
     void dhcp_interface_state::state_discover(dhcp_mbuf &dm)
     {
         if (dm.get_message_type() != DHCP_MT_OFFER) {
@@ -667,6 +681,9 @@ namespace dhcp {
         _sock->dhcp_send(dm_req);
     }
 
+    /* 收到ACK消息,设置IP, routes, DNS
+       收到NAK消息,重新discover
+     */
     void dhcp_interface_state::state_request(dhcp_mbuf &dm)
     {
         if (dm.get_message_type() == DHCP_MT_ACK) {

@@ -143,6 +143,9 @@ int osv_execve(const char *path, char *const argv[], char *const envp[],
     std::unordered_map<std::string, std::string> envp_map = envp_to_map(envp);
 
     waiter w(sched::thread::current());
+    /* 居然调用std::thread,创建的是主机线程而非osv线程?
+       (osv中有多少主机线程?主机线程和osv线程分别执行什么任务?)
+     */
     // If need to set thread_id, wait until the newly created thread sets it
     // and also sets the new app_runtime on this thread.
     std::thread th = std::thread(thread_run_app_in_namespace,

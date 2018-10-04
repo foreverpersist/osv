@@ -66,6 +66,8 @@ void xen_irq::do_irq()
     xen_vcpu_info *v = &xen_shared_info.vcpu_info[cpu_id];
     unsigned long cpu_mask[8 * 64];
 
+    /* 只有CPU0的中断线程真正有效工作
+     */
     if (cpu_id == 0)
         memset(cpu_mask, -1, sizeof(cpu_mask)); // FIXME: Right now, all events bound to cpu0
     else
@@ -74,6 +76,9 @@ void xen_irq::do_irq()
     trace_xen_irq();
     while (true) {
 
+        /* 用0替换evtchn_pending_sel,返回旧值
+           即等待evtchn_pending_sel值非0
+         */
         sched::thread::wait_until([=, &l1] {
             l1 = v->evtchn_pending_sel.exchange(0, std::memory_order_relaxed);
             return l1;
@@ -82,9 +87,15 @@ void xen_irq::do_irq()
         trace_xen_irq_ret();
         trace_xen_irq_exec();
         while (l1 != 0) {
+            /* bsrq返回左起第一个`1`右边的位数
+               这两步操作结果: l1i - 当前l1左起第一个`1`位置索引, l1 - 当前l1左起第一个`1`置0
+             */
             l1i = bsrq(l1);
             l1 &= ~(1ULL << l1i);
 
+            /* evtchn_mask, evnchn_pending每一项的每一位表示一个端口
+               检查所有端口,回调handler,重新置位
+             */
             while ((l2 = active_evtchns(l1i, cpu_mask)) != 0) {
                 l2i = bsrq(l2);
                 unsigned long port = (l1i * LONG_BIT) + l2i;
@@ -118,6 +129,8 @@ xen_irq::xen_irq(interrupt *intr)
         _intr.reset(intr);
 }
 
+/* 使用单例xen_irq_handlers提供面向过程API
+ */
 static xen_irq *xen_irq_handlers;
 void xen_handle_irq()
 {
