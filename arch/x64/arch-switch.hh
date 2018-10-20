@@ -147,6 +147,9 @@ void thread::init_stack()
     _state.exception_stack = _arch.exception_stack + sizeof(_arch.exception_stack);
 }
 
+/* 分配线性空间内存写入TLS等,_tcb前面的相邻内存是TLS数据
+       | user_tls_data | tls | 0..0 | tcb |
+ */
 void thread::setup_tcb()
 {
     assert(tls.size);
@@ -256,6 +259,8 @@ void thread::free_tcb()
     }
 }
 
+/* 由arch/x64/entry.S汇编指令调用
+ */
 void thread_main_c(thread* t)
 {
     arch::irq_enable();

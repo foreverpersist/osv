@@ -100,11 +100,22 @@ void flush_tlb_local();
 /* flush tlb for all */
 void flush_tlb_all();
 
+/* level取值范围[0, 4]
+       0 - page_size
+       1 - huge_page_size
+       K - 1 << (12 + 9K)
+ */
 constexpr size_t page_size_level(unsigned level)
 {
     return size_t(1) << (page_size_shift + pte_per_page_shift * level);
 }
 
+/* 编译期常量
+              leaf_capable  large_capable  intermediate_capable  size
+       N = 0     true            false           false           page_size
+       N = 1     true            true            true            huge_page_size
+       N = K     false           false           true            1 << (12 + 9K)
+ */
 template<int N>
 struct pt_level_traits {
     typedef typename std::integral_constant<bool, N == 0 || N == 1>::type leaf_capable;
@@ -117,6 +128,9 @@ template<int N> class hw_ptep;
 template<int N> class hw_ptep_impl;
 template<int N> class hw_ptep_rcu_impl;
 
+/* 与架构无关的Page Table Element
+   x64架构与其对应的pt_element基本直接继承,重写了内部的方法
+ */
 /* common arch-independent interface for pt_element */
 template<int N>
 class pt_element_common {
@@ -156,6 +170,9 @@ public:
         set_addr(addr, large());
     }
 protected:
+    /* 设置第nr位的值为v
+       先 与0, 再 或v
+     */
     inline void set_bit(unsigned nr, bool v) {
         x &= ~(u64(1) << nr);
         x |= u64(v) << nr;
@@ -171,6 +188,8 @@ protected:
 #include "arch-mmu.hh"
 
 namespace mmu {
+/* 新建一个传入值为0的pt_element
+ */
 template<int N>
 pt_element<N> make_empty_pte() { return pt_element<N>(); }
 
@@ -185,6 +204,8 @@ bool is_page_fault_write_exclusive(unsigned int err);
 
 bool fast_sigsegv_check(uintptr_t addr, exception_frame* ef);
 
+/* 持有一个atomic<pt_element>或pt_element
+ */
 template<int N>
 class hw_ptep_impl_base {
 protected:
@@ -195,6 +216,9 @@ protected:
     };
 };
 
+/* read  - 直接读pt_element*
+   write - 写atomic<pt_element>*
+ */
 template<int N>
 class hw_ptep_impl : public hw_ptep_impl_base<N> {
 public:
@@ -208,6 +232,8 @@ protected:
     using hw_ptep_impl_base<N>::p;
 };
 
+/* 只使用atomic<pt_element>*
+ */
 template<int N>
 class hw_ptep_rcu_impl : public hw_ptep_impl_base<N> {
 public:
@@ -220,6 +246,9 @@ protected:
     using hw_ptep_impl_base<N>::x;
 };
 
+/* N = 0,1 - hw_ptep_base -> hw_ptep_rcu_impl
+   N = K   - hw_ptep_base -> hw_ptep_impl
+ */
 template<int N>
 using hw_ptep_base = typename std::conditional<
                 std::integral_constant<bool, (N == 1) || (N == 2)>::value, // only L1 and L2 PTs are RCU protected
@@ -235,6 +264,8 @@ public:
     hw_ptep(const hw_ptep& a) : hw_ptep_base<N>(a.p) {}
     hw_ptep& operator=(const hw_ptep& a) = default;
 
+    /* 修改atomic<pt_element>*
+     */
     pt_element<N> exchange(pt_element<N> newval) {
         return x->exchange(newval);
     }
@@ -242,6 +273,8 @@ public:
         return x->compare_exchange_strong(oldval, newval, std::memory_order_relaxed);
     }
 
+    /* 新建hw_ptep实例
+     */
     hw_ptep at(unsigned idx) { return hw_ptep(p + idx); }
     static hw_ptep force(pt_element<N>* ptep) { return hw_ptep(ptep); }
     // no longer using this as a page table

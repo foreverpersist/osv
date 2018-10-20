@@ -45,6 +45,8 @@ namespace mmu {
 
 namespace bi = boost::intrusive;
 
+/* 比较addr_range._start(用作set排序)
+ */
 class vma_compare {
 public:
     bool operator ()(const vma& a, const vma& b) const {
@@ -60,6 +62,8 @@ typedef boost::intrusive::set<vma,
                               bi::optimize_size<true>
                               > vma_list_base;
 
+/* 加入上下限anon_vma
+ */
 struct vma_list_type : vma_list_base {
     vma_list_type() {
         // insert markers for the edges of allocatable area
@@ -70,6 +74,8 @@ struct vma_list_type : vma_list_base {
     }
 };
 
+/* vma_list管理的vma,其addr_range在[0, 0x 8000 0000 0000]之间(128T)
+ */
 __attribute__((init_priority((int)init_prio::vma_list)))
 vma_list_type vma_list;
 
@@ -82,6 +88,11 @@ rwlock_t vma_list_mutex;
 // (linear map, etc.) which are not part of vma_list.
 mutex page_table_high_mutex;
 
+/* 返回地址掩码 shift = 9 * level + 12
+       1...1 0...0
+       |     |   |
+      63   shift 0
+ */
 // 1's for the bits provided by the pte for this level
 // 0's for the bits provided by the virtual address for this level
 phys pte_level_mask(unsigned level)
@@ -91,6 +102,16 @@ phys pte_level_mask(unsigned level)
     return ~((phys(1) << shift) - 1);
 }
 
+/* [elf_start, elf_start+elf_size]之间采用直接映射,其他加上偏移phys_mem
+   此处没有进行Mem Area的调整
+         0                        phys_mem
+   phys  | elf_start | elf_size |     | elf_start | elf_size |      |
+               |          |        |_____________________________
+               |__________|_________________                    |
+                          |                |                    |
+                          V                V                    V
+   virt  |           |..........|     |...........|          |......|
+ */
 void* phys_to_virt(phys pa)
 {
     // The ELF is mapped 1:1
@@ -104,6 +125,11 @@ void* phys_to_virt(phys pa)
 
 phys virt_to_phys_pt(void* virt);
 
+/* [elf_start, elf_start+elf_size]           - 直接映射
+   (debug_base, ...)                         - 
+   [phys_mem, phys_mem+elf_start),           - 取低44位(减去xx_mem_area_base)
+   (phys_mem+elf_start+elf_size, debug_base]
+ */
 phys virt_to_phys(void *virt)
 {
     // The ELF is mapped 1:1
@@ -123,10 +149,15 @@ phys virt_to_phys(void *virt)
     return reinterpret_cast<uintptr_t>(virt) & (mem_area_size - 1);
 }
 
+/* 分配一个线性地址page,根据线性地址使用make_pte赋值page内每个item
+ */
 template <int N, typename MakePTE>
 phys allocate_intermediate_level(MakePTE make_pte)
 {
     phys pt_page = virt_to_phys(memory::alloc_page());
+    /* phys_cast使用phys_to_virt,得到的线性地址没有调整Mem Area
+       每个pt_element占8B,一个page(4096B)刚好被拆分整pte_per_page(512)项
+     */
     // since the pt is not yet mapped, we don't need to use hw_ptep
     pt_element<N>* pt = phys_cast<pt_element<N>>(pt_page);
     for (auto i = 0; i < pte_per_page; ++i) {
@@ -135,6 +166,10 @@ phys allocate_intermediate_level(MakePTE make_pte)
     return pt_page;
 }
 
+/* 分配一个线性地址page,根据线性地址以org的地址为基础为每个item赋值
+   以此page物理地址新建pt_element替代ptep内容
+       item - org第50-0位 | 20-12位(取值[0,511])
+ */
 template<int N>
 void allocate_intermediate_level(hw_ptep<N> ptep, pt_element<N> org)
 {
@@ -147,6 +182,9 @@ void allocate_intermediate_level(hw_ptep<N> ptep, pt_element<N> org)
     ptep.write(make_intermediate_pte(ptep, pt_page));
 }
 
+/* 在ptep内容为空时,分配一个线性地址page,根据线性地址为每个item赋空值,
+   以此page物理地址新建pt_element替代ptep内容
+ */
 template<int N>
 void allocate_intermediate_level(hw_ptep<N> ptep)
 {
@@ -158,6 +196,9 @@ void allocate_intermediate_level(hw_ptep<N> ptep)
     }
 }
 
+/* 标记cow(第53位),若cow = true,标记不可写
+   cow只能作用于page级别
+ */
 // only 4k can be cow for now
 pt_element<0> pte_mark_cow(pt_element<0> pte, bool cow)
 {
@@ -168,6 +209,8 @@ pt_element<0> pte_mark_cow(pt_element<0> pte, bool cow)
     return pte;
 }
 
+/* 修改ptep内容的标志位以设置权限
+ */
 template<int N>
 bool change_perm(hw_ptep<N> ptep, unsigned int perm)
 {
@@ -199,6 +242,11 @@ void split_large_page(hw_ptep<N> ptep)
 {
 }
 
+/* ptep原本指向一个huge_page,分配一个线性地址page,根据线性地址为每个item赋值,
+   这些item指向huge_page分割的pte_per_page个page,
+   以新分配的page新建pt_element替换ptep内容,使之
+   ptep从指向huge_page变为指向一级page table(只能作用于huge_page)
+ */
 template<>
 void split_large_page(hw_ptep<1> ptep)
 {
@@ -207,6 +255,8 @@ void split_large_page(hw_ptep<1> ptep)
     allocate_intermediate_level(ptep, pte_orig);
 }
 
+/* 实际只管理2级level(page, huge_page)
+ */
 struct page_allocator {
     virtual bool map(uintptr_t offset, hw_ptep<0> ptep, pt_element<0> pte, bool write) = 0;
     virtual bool map(uintptr_t offset, hw_ptep<1> ptep, pt_element<1> pte, bool write) = 0;
@@ -215,12 +265,18 @@ struct page_allocator {
     virtual ~page_allocator() {}
 };
 
+/* 累计vma_list中每个vma的大小(_range表示的大小)
+ */
 unsigned long all_vmas_size()
 {
     SCOPE_LOCK(vma_list_mutex.for_read());
     return std::accumulate(vma_list.begin(), vma_list.end(), size_t(0), [](size_t s, vma& v) { return s + v.size(); });
 }
 
+/* 限制vstart1,vend1范围(假定slop = 1 << K)
+       vstart1 - 低K位置0,且不能低于min
+       vend1   - 低K位置1,且不能高于max
+ */
 void clamp(uintptr_t& vstart1, uintptr_t& vend1,
            uintptr_t min, size_t max, size_t slop)
 {
@@ -230,6 +286,8 @@ void clamp(uintptr_t& vstart1, uintptr_t& vend1,
     vend1 = std::min(vend1, max);
 }
 
+/* 返回线性地址在level级页表中的索引位置(level越小,越偏向低地址)
+ */
 constexpr unsigned pt_index(uintptr_t virt, unsigned level)
 {
     return pt_index(reinterpret_cast<void*>(virt), level);
@@ -242,6 +300,9 @@ void set_nr_page_sizes(unsigned nr)
     nr_page_sizes = nr;
 }
 
+/* 声明了多个枚举类型,为何要故意反人类设置(key,value)?
+       yes = true, no = false 这样不好吗?
+ */
 enum class allocate_intermediate_opt : bool {no = true, yes = false};
 enum class skip_empty_opt : bool {no = true, yes = false};
 enum class descend_opt : bool {no = true, yes = false};
@@ -249,6 +310,13 @@ enum class once_opt : bool {no = true, yes = false};
 enum class split_opt : bool {no = true, yes = false};
 enum class account_opt: bool {no = true, yes = false};
 
+/* 一个接口声明
+       有效方法:
+           page
+           intermediate_page_pre
+           intermediate_page_post
+           sub_page
+ */
 // Parameter descriptions:
 //  Allocate - if "yes" page walker will allocate intermediate page if one is missing
 //             otherwise it will skip to next address.
@@ -261,6 +329,10 @@ template<allocate_intermediate_opt Allocate, skip_empty_opt Skip = skip_empty_op
         descend_opt Descend = descend_opt::yes, once_opt Once = once_opt::no, split_opt Split = split_opt::yes>
 class page_table_operation {
 protected:
+    /* 声明时故意写yes = false,在此处使用opt2bool完成枚举值的比较
+       完全可以正常声明,然后直接判断v,而不必使用 v == T::yes
+       强行增加阅读成本?
+     */
     template<typename T>  bool opt2bool(T v) { return v == T::yes; }
 public:
     bool allocate_intermediate(void) { return opt2bool(Allocate); }
@@ -292,6 +364,8 @@ public:
     void sub_page(hw_ptep<1> ptep, int level, uintptr_t offset) { return; }
 };
 
+/* 仅在N = 1时有效
+ */
 template<typename PageOps, int N>
 static inline typename std::enable_if<pt_level_traits<N>::large_capable::value>::type
 sub_page(PageOps& pops, hw_ptep<N> ptep, int level, uintptr_t offset)
@@ -305,6 +379,8 @@ sub_page(PageOps& pops, hw_ptep<N> ptep, int level, uintptr_t offset)
 {
 }
 
+/* 在N = 0|1时有效
+ */
 template<typename PageOps, int N>
 static inline typename std::enable_if<pt_level_traits<N>::leaf_capable::value, bool>::type
 page(PageOps& pops, hw_ptep<N> ptep, uintptr_t offset)
@@ -320,6 +396,8 @@ page(PageOps& pops, hw_ptep<N> ptep, uintptr_t offset)
     return false;
 }
 
+/* 仅在N = 1时有效
+ */
 template<typename PageOps, int N>
 static inline typename std::enable_if<pt_level_traits<N>::large_capable::value>::type
 intermediate_page_pre(PageOps& pops, hw_ptep<N> ptep, uintptr_t offset)
@@ -333,6 +411,8 @@ intermediate_page_pre(PageOps& pops, hw_ptep<N> ptep, uintptr_t offset)
 {
 }
 
+/* 仅在N = 1时有效
+ */
 template<typename PageOps, int N>
 static inline typename std::enable_if<pt_level_traits<N>::large_capable::value>::type
 intermediate_page_post(PageOps& pops, hw_ptep<N> ptep, uintptr_t offset)
@@ -348,6 +428,8 @@ intermediate_page_post(PageOps& pops, hw_ptep<N> ptep, uintptr_t offset)
 
 template<typename PageOp, int ParentLevel> class map_level;
 
+/* 以page_table_root为parent进行map_level()操作
+ */
 template<typename PageOp>
         void map_range(uintptr_t vma_start, uintptr_t vstart, size_t size, PageOp& page_mapper, size_t slop = page_size)
 {
@@ -369,19 +451,29 @@ private:
 
     map_level(uintptr_t vma_start, uintptr_t vcur, size_t size, PageOp& page_mapper, size_t slop) :
         vma_start(vma_start), vcur(vcur), vend(vcur + size - 1), slop(slop), page_mapper(page_mapper) {}
+    /* read在N = ParentLevel|level时有效
+     */
     pt_element<ParentLevel> read(const hw_ptep<ParentLevel>& ptep) const {
         return page_mapper.ptep_read(ptep);
     }
     pt_element<level> read(const hw_ptep<level>& ptep) const {
         return page_mapper.ptep_read(ptep);
     }
+    /* 返回非large的ptep的addr
+       仅在本level有效
+     */
     hw_ptep<level> follow(hw_ptep<ParentLevel> ptep)
     {
         return hw_ptep<level>::force(phys_cast<pt_element<level>>(read(ptep).next_pt_addr()));
     }
+    /* PageOp设置skip且ptep为空时,返回true
+       尽在本level有效
+     */
     bool skip_pte(hw_ptep<level> ptep) {
         return page_mapper.skip_empty() && read(ptep).empty();
     }
+    /* PageOp设置descend且ptep非空非large时,返回true
+     */
     bool descend(hw_ptep<level> ptep) {
         return page_mapper.descend() && !read(ptep).empty() && !read(ptep).large();
     }
@@ -391,6 +483,11 @@ private:
             hw_ptep<N> ptep, uintptr_t base_virt)
     {
     }
+    /* 以ptep为起点进行map_level()操作
+       仅在本level有效
+       因为声明了friend class map_level<PageOp, ParentLevel + 1>,
+       此处pt_mapper的ParentLevel会降低一级
+     */
     template<int N>
     typename std::enable_if<N == level && N != 0>::type
     map_range(uintptr_t vcur, size_t size, PageOp& page_mapper, size_t slop,
@@ -399,13 +496,23 @@ private:
         map_level<PageOp, level> pt_mapper(vma_start, vcur, size, page_mapper, slop);
         pt_mapper(ptep, base_virt);
     }
+    /* 逻辑很复杂?
+     */
     void operator()(hw_ptep<ParentLevel> parent, uintptr_t base_virt = 0) {
+        /* parent为空白,且PageOp设置了allocate时,
+           分配一个空白page以新建pt_element并替代parent内容
+         */
         if (!read(parent).valid()) {
             if (!page_mapper.allocate_intermediate()) {
                 return;
             }
             allocate_intermediate_level(parent);
         } else if (read(parent).large()) {
+            /* 访问huge_page
+                   设置了large - 将huge分割为pages,并分配指向他们的page以更新parent内容
+                   未设置large - 使用PageOp自己的sub_page
+
+             */
             if (page_mapper.split_large(parent, ParentLevel)) {
                 // We're trying to change a small page out of a huge page (or
                 // in the future, potentially also 2 MB page out of a 1 GB),
@@ -433,6 +540,9 @@ private:
             clamp(vstart1, vend1, base_virt, base_virt + step - 1, slop);
             if (unsigned(level) < page_mapper.nr_page_sizes() && vstart1 == base_virt && vend1 == base_virt + step - 1) {
                 uintptr_t offset = base_virt - vma_start;
+                /* level = 1,非skip时,设置了descent或page失败,则访问下一级
+                   level = 0,非skip时,直接使用page
+                 */
                 if (level) {
                     if (!skip_pte(ptep)) {
                         if (descend(ptep) || !page(page_mapper, ptep, offset)) {
@@ -447,6 +557,8 @@ private:
                     }
                 }
             } else {
+                /* 并未正好是一个page或huge_page时,则访问下一级范围
+                 */
                 map_range(vstart1, vend1 - vstart1 + 1, page_mapper, slop, ptep, base_virt);
             }
             base_virt += step;
@@ -455,6 +567,8 @@ private:
     }
 };
 
+/* 仅实现了page - 使用物理地址(start + offset)新建pt_element替代ptep内容,即page的线性地址 -> 物理地址映射
+ */
 class linear_page_mapper :
         public page_table_operation<allocate_intermediate_opt::yes, skip_empty_opt::no, descend_opt::no> {
     phys start;
@@ -472,6 +586,8 @@ public:
     }
 };
 
+/* VMA相关操作(非线性映射)的父类,未实现任何PageOp的方法
+ */
 template<allocate_intermediate_opt Allocate, skip_empty_opt Skip = skip_empty_opt::yes,
          account_opt Account = account_opt::no>
 class vma_operation :
@@ -506,6 +622,8 @@ private:
     bool _write;
     bool _map_dirty;
     template<int N>
+    /* 未设置_write标记或pte已设置可写位则跳过
+     */
     bool skip(pt_element<N> pte) {
         if (pte.empty()) {
             return false;
@@ -527,6 +645,8 @@ public:
             return true;
         }
 
+        /* 新建空白pt_element并依据_map_dirty和_write设置dirty位
+         */
         pte = dirty(make_leaf_pte(ptep, 0, _perm));
 
         try {
@@ -540,6 +660,8 @@ public:
     }
 };
 
+/* populate在N = 0时的特殊情况
+ */
 template <account_opt Account = account_opt::no>
 class populate_small : public populate<Account> {
 public:
@@ -553,6 +675,8 @@ public:
     unsigned nr_page_sizes(void) { return 1; }
 };
 
+/* 仅实现了page - 限制N != 1(N = 0)
+ */
 class splithugepages : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes, account_opt::no> {
 public:
     splithugepages() { }
@@ -565,6 +689,8 @@ public:
     unsigned nr_page_sizes(void) { return 1; }
 };
 
+/* 即将被释放的线性空间pages缓冲区
+ */
 struct tlb_gather {
     static constexpr size_t max_pages = 20;
     struct tlb_page {
@@ -573,6 +699,10 @@ struct tlb_gather {
     };
     size_t nr_pages = 0;
     tlb_page pages[max_pages];
+    /* pages容量已满,则触发flush
+       将(addr, size)加入pages
+       返回值为是否已触发flush
+     */
     bool push(void* addr, size_t size) {
         bool flushed = false;
         if (nr_pages == max_pages) {
@@ -582,6 +712,9 @@ struct tlb_gather {
         pages[nr_pages++] = { addr, size };
         return flushed;
     }
+    /* 执行flush_tlb_all刷新所有TLB
+       然后逐一释放pages中的page/huge_page(线性地址空间)
+     */
     bool flush() {
         if (!nr_pages) {
             return false;
@@ -616,6 +749,9 @@ public:
     bool page(hw_ptep<N> ptep, uintptr_t offset) {
         void* addr = phys_to_virt(ptep.read().addr());
         size_t size = pt_level_traits<N>::size::value;
+        /* unmap成功后加入_tlb_gather
+           do_flush表示是否仍需要执行flush,默认为true,若触发了有效flush则为false
+         */
         // Note: we free the page even if it is already marked "not present".
         // evacuate() makes sure we are only called for allocated pages, and
         // not-present may only mean mprotect(PROT_NONE).
@@ -627,6 +763,9 @@ public:
         this->account(size);
         return true;
     }
+    /* 等待RCU同步,以释放ptep映射的线性地址page,然后将ptep置为空白
+       仅在N = 1时有效
+     */
     void intermediate_page_post(hw_ptep<1> ptep, uintptr_t offset) {
         osv::rcu_defer([](void *page) { memory::free_page(page); }, phys_to_virt(ptep.read().addr()));
         ptep.write(make_empty_pte<1>());
@@ -637,6 +776,8 @@ public:
     void finalize(void) {}
 };
 
+/* 仅改变标志位
+ */
 class protection : public vma_operation<allocate_intermediate_opt::no, skip_empty_opt::yes> {
 private:
     unsigned int perm;
@@ -659,6 +800,9 @@ private:
 public:
     dirty_cleaner(T handler) : do_flush(false), handler(handler) {}
 
+    /* 清除dirty位,通过handler()执行真正的清理工作
+       只要清除dirty位,do_flush一定为true
+     */
     template<int N>
     bool page(hw_ptep<N> ptep, uintptr_t offset) {
         pt_element<N> pte = ptep.read();
@@ -691,11 +835,15 @@ private:
     };
     std::stack<elm> queue;
     dirty_page_sync(file *file, f_offset offset, uint64_t size) : _file(file), _offset(offset), _size(size) {}
+    /* 记录(virt, len, off)信息加入queue
+     */
     void operator()(phys addr, uintptr_t offset, size_t size) {
         off_t off = _offset + offset;
         size_t len = std::min(size, _size - off);
         queue.push(elm{{phys_to_virt(addr), len}, off});
     }
+    /* 通过_file->write清理queue里每一项
+     */
     void finalize() {
         while(!queue.empty()) {
             elm w = queue.top();
@@ -727,6 +875,8 @@ public:
     template<int N>
     bool page(hw_ptep<N> ptep, uintptr_t offset) {
         assert(result == null);
+        /* 先取v的低(9 * level + 19)位,再和addr进行 或运算
+         */
         result = ptep.read().addr() | (v & ~pte_level_mask(N));
         return true;
     }
@@ -736,6 +886,8 @@ public:
     }
 };
 
+/* 清理全空的二级pte
+ */
 class cleanup_intermediate_pages
     : public page_table_operation<
           allocate_intermediate_opt::no,
@@ -754,6 +906,8 @@ public:
     void intermediate_page_pre(hw_ptep<1> ptep, uintptr_t offset) {
         live_ptes = 0;
     }
+    /* 在live_ptes = 0时,将ptep置为空白,并等待RCU以释放原来存放items的线性地址page
+     */
     void intermediate_page_post(hw_ptep<1> ptep, uintptr_t offset) {
         if (!live_ptes) {
             auto old = ptep.read();
@@ -774,6 +928,9 @@ private:
     bool do_flush = false;
 };
 
+/* 使用virt_pte_visitor处理ptep
+   代理作用
+ */
 class virt_to_pte_map_rcu :
         public page_table_operation<allocate_intermediate_opt::no, skip_empty_opt::yes,
         descend_opt::yes, once_opt::yes, split_opt::no> {
@@ -799,6 +956,11 @@ public:
     }
 };
 
+/* 通过map_range从最高level(4)开始使用PageOp逐级处理pte
+   处理PageOp的TLB刷新标志
+   执行PageOp的清理finalize
+   返回PageOp的计数
+ */
 template<typename T> ulong operate_range(T mapper, void *vma_start, void *start, size_t size)
 {
     start = align_down(start, page_size);
@@ -904,6 +1066,10 @@ find_intersecting_vmas(const addr_range& r)
 }
 
 
+/* 从vma_list中选出包含(addr, size)的集合,
+   从中划分出刚好对应(addr, size)的VMA集合,
+   设置VMA权限,并通过map_range配合protection改变已映射区域权限
+ */
 /**
  * Change virtual memory range protection
  *
@@ -934,6 +1100,8 @@ static error protect(const void *addr, size_t size, unsigned int perm)
     return no_error();
 }
 
+/* 从vma_list已有VMA中间空闲区域选择size大小区域,优先选择start作为起点
+ */
 uintptr_t find_hole(uintptr_t start, uintptr_t size)
 {
     bool small = size < huge_page_size;
@@ -964,6 +1132,11 @@ uintptr_t find_hole(uintptr_t start, uintptr_t size)
     throw make_error(ENOMEM);
 }
 
+/* 从vma_list中选出包含(addr, end)的集合,
+   从中划分出刚好对应(addr, size)的VMA集合,
+   通过operate_range配合unpopulate执行page_allocator::unmap
+   从vma_list移除对应VMA,必要时通知JVM heap更新内存计数
+ */
 ulong evacuate(uintptr_t start, uintptr_t end)
 {
     auto range = find_intersecting_vmas(addr_range(start, end));
@@ -986,6 +1159,8 @@ ulong evacuate(uintptr_t start, uintptr_t end)
     // FIXME: range also indicates where we can insert a new anon_vma, use it
 }
 
+/* 同evacuate,只是做了size对齐
+ */
 static void unmap(const void* addr, size_t size)
 {
     size = align_up(size, mmu::page_size);
@@ -993,6 +1168,9 @@ static void unmap(const void* addr, size_t size)
     evacuate(start, start+size);
 }
 
+/*  从vma_list中选出包含(addr, end)的集合,
+    每个VMA执行自己的sync
+ */
 static error sync(const void* addr, size_t length, int flags)
 {
     length = align_up(length, mmu::page_size);
@@ -1014,6 +1192,9 @@ private:
     virtual void* fill(void* addr, uint64_t offset, uintptr_t size) {
         return addr;
     }
+    /* ptep为空白时,使用addr设置pte,替换ptep内容
+       替换失败时,释放addr指向的线性空间
+     */
     template<int N>
     bool set_pte(void *addr, hw_ptep<N> ptep, pt_element<N> pte) {
         if (!addr) {
@@ -1030,6 +1211,9 @@ private:
         return true;
     }
 public:
+    /* 分配线性空间page/huge_page,以其物理地址设置pte,替换空白的ptep
+       替换失败则释放已分配的线性空间
+     */
     virtual bool map(uintptr_t offset, hw_ptep<0> ptep, pt_element<0> pte, bool write) override {
         return set_pte(fill(memory::alloc_page(), offset, page_size), ptep, pte);
     }
@@ -1037,6 +1221,8 @@ public:
         size_t size = pt_level_traits<1>::size::value;
         return set_pte(fill(memory::alloc_huge_page(size), offset, size), ptep, pte);
     }
+    /* 将ptep置为空白
+     */
     virtual bool unmap(void *addr, uintptr_t offset, hw_ptep<0> ptep) override {
         clear_pte(ptep);
         return true;
@@ -1105,6 +1291,10 @@ public:
     }
 };
 
+/* 分配VMA加入到vma_list
+       search = true  - 通过find_hole找到一个可用区域(优先选择start作为起点)
+       search = false - 通过evacute强制释放必要VMA确保指定区域可用
+ */
 uintptr_t allocate(vma *v, uintptr_t start, size_t size, bool search)
 {
     if (search) {
@@ -1129,6 +1319,8 @@ inline bool in_vma_range(void* addr)
     return reinterpret_cast<long>(addr) >= 0;
 }
 
+/* 通过operate_range配合populate和initialized_anonymous_page_provider映射内存
+ */
 void vpopulate(void* addr, size_t size)
 {
     assert(!in_vma_range(addr));
@@ -1138,6 +1330,8 @@ void vpopulate(void* addr, size_t size)
     }
 }
 
+/* 通过operate_range配合unpopulate和initialized_anonymous_page_provider解除映射
+ */
 void vdepopulate(void* addr, size_t size)
 {
     assert(!in_vma_range(addr));
@@ -1147,6 +1341,8 @@ void vdepopulate(void* addr, size_t size)
     }
 }
 
+/* 通过operate_range配合cleanup_intermediate_pages清理空白的二级pte
+ */
 void vcleanup(void* addr, size_t size)
 {
     assert(!in_vma_range(addr));
@@ -1156,6 +1352,9 @@ void vcleanup(void* addr, size_t size)
     }
 }
 
+/* 从vma_list中选出包含(addr, length)的VMA
+   每个VMA使用自己的page_allocator构建unpopulate执行自己的operate_range
+ */
 static void depopulate(void* addr, size_t length)
 {
     length = align_up(length, mmu::page_size);
@@ -1168,6 +1367,9 @@ static void depopulate(void* addr, size_t length)
     }
 }
 
+/* 从vma_list中选出包含(addr, length)的VMA
+   每个VMA使用splithugepages执行自己的operate_range
+ */
 static void nohugepage(void* addr, size_t length)
 {
     length = align_up(length, mmu::page_size);
@@ -1183,6 +1385,10 @@ static void nohugepage(void* addr, size_t length)
     }
 }
 
+/* 应该作用于已映射区域
+       advise_dontneed   - 执行depopulate
+       advise_nohugepage - 执行nohugepage
+ */
 error advise(void* addr, size_t size, int advice)
 {
     WITH_LOCK(vma_list_mutex.for_write()) {
@@ -1200,6 +1406,8 @@ error advise(void* addr, size_t size, int advice)
     }
 }
 
+/* VMA使用自己的page_allocator构建populate执行自己的operate_range
+ */
 template<account_opt Account = account_opt::no>
 ulong populate_vma(vma *vma, void *v, size_t size, bool write = false)
 {
@@ -1211,6 +1419,10 @@ ulong populate_vma(vma *vma, void *v, size_t size, bool write = false)
     return total;
 }
 
+/* 使用page_allocator_noinit/page_allocator_init构建anon_vma
+   通过allocate分配有效VMA,
+   再通过populate_vma映射
+ */
 void* map_anon(const void* addr, size_t size, unsigned flags, unsigned perm)
 {
     bool search = !(flags & mmap_fixed);
@@ -1225,16 +1437,23 @@ void* map_anon(const void* addr, size_t size, unsigned flags, unsigned perm)
     return v;
 }
 
+/* 非共享
+ */
 std::unique_ptr<file_vma> default_file_mmap(file* file, addr_range range, unsigned flags, unsigned perm, off_t offset)
 {
     return std::unique_ptr<file_vma>(new file_vma(range, perm, flags, file, offset, new map_file_page_read(file, offset)));
 }
 
+/* 可能共享
+ */
 std::unique_ptr<file_vma> map_file_mmap(file* file, addr_range range, unsigned flags, unsigned perm, off_t offset)
 {
     return std::unique_ptr<file_vma>(new file_vma(range, perm, flags, file, offset, new map_file_page_mmap(file, offset, flags & mmap_shared)));
 }
 
+/* 使用map_file_read构建file_vma(不使用cache或size小于page_size的文件不允许共享)
+   其他同map_anon
+ */
 void* map_file(const void* addr, size_t size, unsigned flags, unsigned perm,
               fileref f, f_offset offset)
 {
@@ -1252,6 +1471,9 @@ void* map_file(const void* addr, size_t size, unsigned flags, unsigned perm,
     return v;
 }
 
+/* [elf_start, elf_start + size], [phys_mem, ...]全是线性映射?
+   是否写错了?
+ */
 bool is_linear_mapped(const void *addr, size_t size)
 {
     if ((addr >= elf_start) && (addr + size <= elf_start + elf_size)) {
@@ -1260,6 +1482,8 @@ bool is_linear_mapped(const void *addr, size_t size)
     return addr >= phys_mem;
 }
 
+/* 存在于vma_list的线性地址区域都已被映射
+ */
 // Checks if the entire given memory region is mmap()ed (in vma_list).
 bool ismapped(const void *addr, size_t size)
 {
@@ -1277,6 +1501,8 @@ bool ismapped(const void *addr, size_t size)
     return false;
 }
 
+/* 通过safe_load检查每一个字节
+ */
 // Checks if the entire given memory region is readable.
 bool isreadable(void *addr, size_t size)
 {
@@ -1289,6 +1515,8 @@ bool isreadable(void *addr, size_t size)
     return true;
 }
 
+/* 检查VMA是否缺少error_code对应的权限
+ */
 bool access_fault(vma& vma, unsigned int error_code)
 {
     auto perm = vma.perm();
@@ -1307,6 +1535,8 @@ TRACEPOINT(trace_mmu_vm_fault, "addr=%p, error_code=%x", uintptr_t, unsigned int
 TRACEPOINT(trace_mmu_vm_fault_sigsegv, "addr=%p, error_code=%x, %s", uintptr_t, unsigned int, const char*);
 TRACEPOINT(trace_mmu_vm_fault_ret, "addr=%p, error_code=%x", uintptr_t, unsigned int);
 
+/* 产生SIGSEGV信号
+ */
 static void vm_sigsegv(uintptr_t addr, exception_frame* ef)
 {
     void *pc = ef->get_pc();
@@ -1318,11 +1548,15 @@ static void vm_sigsegv(uintptr_t addr, exception_frame* ef)
     osv::handle_mmap_fault(addr, SIGSEGV, ef);
 }
 
+/* 产生SIGBUS信号
+ */
 static void vm_sigbus(uintptr_t addr, exception_frame* ef)
 {
     osv::handle_mmap_fault(addr, SIGBUS, ef);
 }
 
+/* 分析错误原因,产生SIGSEGV信号,或由VMA执行自己的fault处理
+ */
 void vm_fault(uintptr_t addr, exception_frame* ef)
 {
     trace_mmu_vm_fault(addr, ef->get_error());
@@ -1334,6 +1568,8 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
     addr = align_down(addr, mmu::page_size);
     WITH_LOCK(vma_list_mutex.for_read()) {
         auto vma = find_intersecting_vma(addr);
+        /* VMA不存在,或VMA缺少error对应的权限
+         */
         if (vma == vma_list.end() || access_fault(*vma, ef->get_error())) {
             vm_sigsegv(addr, ef);
             trace_mmu_vm_fault_sigsegv(addr, ef->get_error(), "slow");
@@ -1397,6 +1633,8 @@ unsigned vma::flags() const
     return _flags;
 }
 
+/* 新增flag
+ */
 void vma::update_flags(unsigned flag)
 {
     assert(vma_list_mutex.wowned());
@@ -1408,6 +1646,8 @@ bool vma::has_flags(unsigned flag)
     return _flags & flag;
 }
 
+/* 直接使用operate_range
+ */
 template<typename T> ulong vma::operate_range(T mapper, void *addr, size_t size)
 {
     return mmu::operate_range(mapper, reinterpret_cast<void*>(start()), addr, size);
@@ -1424,6 +1664,9 @@ bool vma::map_dirty()
     return _map_dirty;
 }
 
+/* VMA状态OK,但是page tables尚未建立映射时被调用
+   使用populate_vma映射内存
+ */
 void vma::fault(uintptr_t addr, exception_frame *ef)
 {
     auto hp_start = align_up(_range.start(), huge_page_size);
@@ -1458,6 +1701,8 @@ anon_vma::anon_vma(addr_range range, unsigned perm, unsigned flags)
 {
 }
 
+/* 分离出一个新的anon_vma加入vma_list并调整当前_range._end
+ */
 void anon_vma::split(uintptr_t edge)
 {
     if (edge <= _range.start() || edge >= _range.end()) {
@@ -1670,6 +1915,8 @@ ulong map_jvm(unsigned char* jvm_addr, size_t size, size_t align, balloon_ptr b)
     return 0;
 }
 
+/* 检查设定的权限和文件权限是否匹配
+ */
 file_vma::file_vma(addr_range range, unsigned perm, unsigned flags, fileref file, f_offset offset, page_allocator* page_ops)
     : vma(range, perm, flags | mmap_small, !(flags & mmap_shared), page_ops)
     , _file(file)
@@ -1687,6 +1934,8 @@ void file_vma::fault(uintptr_t addr, exception_frame *ef)
     auto hp_start = align_up(_range.start(), huge_page_size);
     auto hp_end = align_down(_range.end(), huge_page_size);
     auto fsize = ::size(_file);
+    /* 文件访问越界,产生SIGBUS信号
+     */
     if (offset(addr) >= fsize) {
         vm_sigbus(addr, ef);
         return;
@@ -1708,6 +1957,8 @@ file_vma::~file_vma()
     delete _page_ops;
 }
 
+/* 分离出一个新的file_vma(类似map_file)加入vma_list并调整当前_range._end
+ */
 void file_vma::split(uintptr_t edge)
 {
     if (edge <= _range.start() || edge >= _range.end()) {
@@ -1719,8 +1970,13 @@ void file_vma::split(uintptr_t edge)
     vma_list.insert(*n);
 }
 
+/* map_file_page_read - 不使用pagecache,通过operate_range配合dirty_cleaner直接写文件
+   map_file_page_mmap - 使用pagecache,直接使用_file->sync
+ */
 error file_vma::sync(uintptr_t start, uintptr_t end)
 {
+    /* 必须是共享映射
+     */
     if (!has_flags(mmap_shared))
         return make_error(ENOMEM);
 
@@ -1751,6 +2007,8 @@ error file_vma::sync(uintptr_t start, uintptr_t end)
     return make_error(sys_fsync(_file.get()));
 }
 
+/* 设定的权限需要和文件本身的权限匹配
+ */
 int file_vma::validate_perm(unsigned perm)
 {
     // fail if mapping a file that is not opened for reading.
@@ -1780,6 +2038,8 @@ std::unique_ptr<file_vma> shm_file::mmap(addr_range range, unsigned flags, unsig
     return map_file_mmap(this, range, flags, perm, offset);
 }
 
+/* 从_pages中寻找或分配一个线性空间huge_page
+ */
 void* shm_file::page(uintptr_t hp_off)
 {
     void *addr;
@@ -1796,6 +2056,8 @@ void* shm_file::page(uintptr_t hp_off)
     return addr;
 }
 
+/* 使用_pages对应huge_page的物理地址设置pte替换ptep内容
+ */
 bool shm_file::map_page(uintptr_t offset, hw_ptep<0> ptep, pt_element<0> pte, bool write, bool shared)
 {
     uintptr_t hp_off = align_down(offset, huge_page_size);
@@ -1823,6 +2085,8 @@ int shm_file::stat(struct stat* buf)
     return 0;
 }
 
+/* 释放_pages所有线性空间huge_pages
+ */
 int shm_file::close()
 {
     for (auto& i : _pages) {
@@ -1832,6 +2096,8 @@ int shm_file::close()
     return 0;
 }
 
+/* 通过map_range配合linear_page_mapper直接映射(直接写pte)
+ */
 void linear_map(void* _virt, phys addr, size_t size,
                 size_t slop, mattr mem_attr)
 {
@@ -1847,6 +2113,8 @@ void free_initial_memory_range(uintptr_t addr, size_t size)
     memory::free_initial_memory_range(phys_cast<void>(addr), size);
 }
 
+/* 对已映射内存使用protect
+ */
 error mprotect(const void *addr, size_t len, unsigned perm)
 {
     SCOPE_LOCK(vma_list_mutex.for_write());
@@ -1858,6 +2126,8 @@ error mprotect(const void *addr, size_t len, unsigned perm)
     return protect(addr, len, perm);
 }
 
+/* 对已映射内存使用sync和unmap
+ */
 error munmap(const void *addr, size_t length)
 {
     SCOPE_LOCK(vma_list_mutex.for_write());
@@ -1871,6 +2141,8 @@ error munmap(const void *addr, size_t length)
     return no_error();
 }
 
+/* 对已映射内存使用sync
+ */
 error msync(const void* addr, size_t length, int flags)
 {
     SCOPE_LOCK(vma_list_mutex.for_read());
@@ -1881,6 +2153,8 @@ error msync(const void* addr, size_t length, int flags)
     return sync(addr, length, flags);
 }
 
+/* 检查指定范围内每个page第一个字节是否可读
+ */
 error mincore(const void *addr, size_t length, unsigned char *vec)
 {
     char *end = align_up((char *)addr + length, page_size);
@@ -1899,6 +2173,8 @@ error mincore(const void *addr, size_t length, unsigned char *vec)
     return no_error();
 }
 
+/* 输出vma_list每一项信息
+ */
 std::string procfs_maps()
 {
     std::ostringstream os;

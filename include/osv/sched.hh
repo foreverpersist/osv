@@ -105,6 +105,8 @@ public:
     operator bool() const {
         return _mask.load(std::memory_order_relaxed);
     }
+    /* 表示cpu_set中第_idx个CPU
+     */
     class iterator {
     public:
         explicit iterator(cpu_set& set)
@@ -141,6 +143,9 @@ public:
             return _idx != other._idx;
         }
     private:
+        /* 取_set._mask低_idx位置0之后尾部连续0的数目设置
+           即从第_idx位起左边第一个非0位索引(下一个优先CPU索引)
+         */
         void advance() {
             unsigned long tmp = _set._mask.load(std::memory_order_relaxed);
             tmp &= ~((1UL << _idx) - 1);
@@ -215,6 +220,8 @@ protected:
     friend class timer_list;
 };
 
+/* 基本等同于timer_base
+ */
 class timer : public timer_base {
 public:
     explicit timer(thread& t);
@@ -328,6 +335,8 @@ class thread : private timer_base::client {
 private:
     struct detached_state;
 public:
+    /* 分配的栈
+     */
     struct stack_info {
         stack_info();
         stack_info(void* begin, size_t size);
@@ -336,6 +345,8 @@ public:
         void (*deleter)(stack_info si);  // null: don't delete
         static void default_deleter(stack_info si);
     };
+    /* 栈,绑定的CPU,状态,名称
+     */
     struct attr {
         stack_info _stack;
         cpu *_pinned_cpu;
@@ -399,6 +410,8 @@ public:
         terminated,
     };
 
+    /* 使用make通过aligned_alloc分配内存新建实例,避免在栈上分配内存
+     */
     // New threads must be created by the sched::make() function, which
     // creates the thread structure on the heap. The constructor is made
     // private so that thread objects *cannot* be created on the stack.
@@ -637,6 +650,8 @@ private:
     struct detached_state;
     friend struct detached_state;
 private:
+    /* 线程方法入口
+     */
     std::function<void ()> _func;
     thread_state _state;
     thread_control_block* _tcb;
@@ -670,6 +685,8 @@ private:
     //
     // wake() on any state except waiting is discarded.
     thread_runtime _runtime;
+    /* 线程和当前所在CPU
+     */
     // part of the thread state is detached from the thread structure,
     // and freed by rcu, so that waking a thread and destroying it can
     // occur in parallel without synchronization via thread_handle
@@ -690,6 +707,8 @@ private:
     // sched_setaffinity()), and the load balancer should consult this bitmask
     // to decide to which cpus a thread may migrate.
     bool _pinned;
+    /* 中断栈和异常栈
+     */
     arch_thread _arch;
     unsigned int _id;
     std::atomic<bool> _interrupted;
@@ -836,7 +855,11 @@ struct cpu : private timer_base::client {
     thread* bringup_thread;
     runqueue_type runqueue;
     timer_list timers;
+    /* 指向自身
+     */
     timer_base preemption_timer;
+    /* 执行CPU的idle线程
+     */
     thread* idle_thread;
     // if true, cpu is now polling incoming_wakeups_mask
     std::atomic<bool> idle_poll = { false };

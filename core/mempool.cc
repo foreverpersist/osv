@@ -113,6 +113,12 @@ PCPU_WORKERITEM(garbage_collector, garbage_collector_fn);
 // 2nd index -> local cpu
 //
 
+/* garbage_sink管理某CPU释放的属于统一CPU的free object list
+   每个CPU持有N个garbage_sink,分别指向free object所属的CPU
+       pcpu_free_list - N * N二维数组
+                        |   |
+                        源  释放   
+ */
 class garbage_sink {
 private:
     static const int signal_threshold = 256;
@@ -136,6 +142,10 @@ public:
 
 static garbage_sink ***pcpu_free_list;
 
+/* 逐一处理属于所有CPU释放的属于当前CPU的N个garbage_sink
+   对garbage_sink内每个obj,使用它所属的pool->free_same_cpu释放
+       所有obj满足: obj-cpu_id = cpu_id
+ */
 void pool::collect_garbage()
 {
     assert(!sched::preemptable());
@@ -184,6 +194,8 @@ static void garbage_collector_fn()
 // contains page ranges large enough. If there is no such list then it is a
 // worst-fit allocation form the page ranges in the tree.
 
+/* 每个pool管理的所有对象大小相同
+ */
 pool::pool(unsigned size)
     : _size(size)
     , _free()
@@ -195,9 +207,13 @@ pool::~pool()
 {
 }
 
+/* pool管理小于page_size/4的小对象(类似Linux中的slab?)
+ */
 const size_t pool::max_object_size = page_size / 4;
 const size_t pool::min_object_size = sizeof(free_object);
 
+/* page_header位于object同一page的起始位置
+ */
 pool::page_header* pool::to_header(free_object* object)
 {
     return reinterpret_cast<page_header*>(
@@ -209,6 +225,9 @@ TRACEPOINT(trace_pool_free, "this=%p, obj=%p", void*, void*);
 TRACEPOINT(trace_pool_free_same_cpu, "this=%p, obj=%p", void*, void*);
 TRACEPOINT(trace_pool_free_different_cpu, "this=%p, obj=%p, obj_cpu=%d", void*, void*, unsigned);
 
+/* 从_free头部取出一个page_header,从中分配一个free_object
+   必要时通过add_page补充_free
+ */
 void* pool::alloc()
 {
     void * ret = nullptr;
@@ -247,6 +266,9 @@ unsigned pool::get_size()
 static inline void* untracked_alloc_page();
 static inline void untracked_free_page(void *v);
 
+/* 通过untracked_alloc_page分配一个page
+   以page为地址初始化新的page_header,并加入_free尾部
+ */
 void pool::add_page()
 {
     // FIXME: this function allocated a page and set it up but on rare cases
@@ -273,17 +295,30 @@ void pool::add_page()
     }
 }
 
+/* 检查_free最后一个page_header是否完整
+   因为add_page总是把新的完整page放入到_free尾部
+ */
 inline bool pool::have_full_pages()
 {
     return !_free->empty() && _free->back().nalloc == 0;
 }
 
+/* 释放源于cpu_id的obj,即obj->cpu_id = cpu_id
+   header变为完整page
+       _free已有full pages - 通过untracked_free_page释放page,必要时清理_free
+       _free无full pages   - 将header加入_free尾部
+   header依旧不完整 将header加入_free头部
+   在CPU上释放源于自身的free object应该是考虑了CPU访存的亲和性
+ */
 void pool::free_same_cpu(free_object* obj, unsigned cpu_id)
 {
     void* object = static_cast<void*>(obj);
     trace_pool_free_same_cpu(this, object);
 
     page_header* header = to_header(obj);
+    /* 释放后得到一个完整page,但_free已有完整page,通过untracked_free_page释放
+       若此header还有free objects,则从_free中移除(若无free objects则之前已移除)
+     */
     if (!--header->nalloc && have_full_pages()) {
         if (header->local_free) {
             _free->erase(_free->iterator_to(*header));
@@ -292,6 +327,10 @@ void pool::free_same_cpu(free_object* obj, unsigned cpu_id)
             untracked_free_page(header);
         }
     } else {
+        /* header无free objects(此时释放了一个free object)
+               header有多个free objects - 作为一个非完整page加入_free头部
+               header仅一个free object  - 作为一个完整page加入_free尾部
+         */
         if (!header->local_free) {
             if (header->nalloc) {
                 _free->push_front(*header);
@@ -306,6 +345,9 @@ void pool::free_same_cpu(free_object* obj, unsigned cpu_id)
     }
 }
 
+/* 将free object加入当前cur_cpu释放的属于obj_cpu的sink中
+   sink在free objects达到阈值是会唤醒obj_cpu进行真正的释放
+ */
 void pool::free_different_cpu(free_object* obj, unsigned obj_cpu, unsigned cur_cpu)
 {
     trace_pool_free_different_cpu(this, obj, obj_cpu);
@@ -313,6 +355,10 @@ void pool::free_different_cpu(free_object* obj, unsigned obj_cpu, unsigned cur_c
     sink->free(obj_cpu, obj);
 }
 
+/* 根据cur_cpu, obj_cpu选择具体路径
+       cur_cpu = obj_cpu  - free_same_cpu
+       cur_cpu != obj_cpu - free_different_cpu
+ */
 void pool::free(void* object)
 {
     trace_pool_free(this, object);
@@ -352,6 +398,8 @@ private:
 malloc_pool malloc_pools[ilog2_roundup_constexpr(page_size) + 1]
     __attribute__((init_priority((int)init_prio::malloc_pools)));
 
+/* 初始化pcpu_free_list
+ */
 struct mark_smp_allocator_intialized {
     mark_smp_allocator_intialized() {
         // FIXME: Handle CPU hot-plugging.
@@ -375,11 +423,16 @@ struct mark_smp_allocator_intialized {
     }
 } s_mark_smp_alllocator_initialized __attribute__((init_priority((int)init_prio::malloc_pools)));
 
+/* malloc_pools大小为log2(page_size) + 1
+   各个malloc_pool的free object size依次为1, 2, 4, ..., max_object_size, max_object_size
+ */
 malloc_pool::malloc_pool()
     : pool(compute_object_size(this - malloc_pools))
 {
 }
 
+/* 返回max(2^pos, max_object_size)
+ */
 size_t malloc_pool::compute_object_size(unsigned pos)
 {
     size_t size = 1 << pos;
@@ -394,6 +447,8 @@ page_range::page_range(size_t _size)
 {
 }
 
+/* page_range的比较函数,实质是比较page_range.size
+ */
 struct addr_cmp {
     bool operator()(const page_range& fpr1, const page_range& fpr2) const {
         return &fpr1 < &fpr2;
@@ -439,6 +494,10 @@ static void on_free(size_t mem)
     free_memory.fetch_add(mem);
 }
 
+/* 更新free_memory
+   通过jvm_ballon_adjust_memory通知JVM在必要时调整堆大小
+   内存达到watermark_lo唤醒reclaimer_thread
+ */
 static void on_alloc(size_t mem)
 {
     free_memory.fetch_sub(mem);
@@ -481,6 +540,9 @@ void reclaimer::wake()
     _blocked.wake_one();
 }
 
+/* 根据空闲内存大小,返回level
+   实际只会返回PRESSURE|NORMAL,不会出现RELAXED|EMERGENCY 
+ */
 pressure reclaimer::pressure_level()
 {
     assert(mutex_owned(&free_page_ranges_lock));
@@ -505,6 +567,8 @@ void oom()
     abort("Out of memory: could not reclaim any further. Current memory: %d Kb", stats::free() >> 10);
 }
 
+/* 空闲内存小于min_emergency_pool_size时,尝试通过wait_for_memory回收以达到min_emergency_pool_size
+ */
 void reclaimer::wait_for_minimum_memory()
 {
     if (emergency_alloc_level) {
@@ -521,6 +585,8 @@ void reclaimer::wait_for_minimum_memory()
     }
 }
 
+/* 通过_oom_blocked等待内存回收
+ */
 // Allocating memory here can lead to a stack overflow. That is why we need
 // to use boost::intrusive for the waiting lists.
 //
@@ -562,6 +628,8 @@ public:
     bool empty() const {
         return _not_empty.none();
     }
+    /* 返回page_range总数目
+     */
     size_t size() const {
         size_t size = _free_huge.size();
         for (auto&& list : _free) {
@@ -571,6 +639,13 @@ public:
     }
 
 private:
+    /* 在addr + pr.size内存的最后写入addr自身
+           |     | addr |
+           |            |
+          addr      addr+pr.size
+       根据page_range大小放入_free_huge或_free,同时置为_not_empty
+       UseBitmap有效时,设置page_range在_bitmap中的首位两项为true
+     */
     template<bool UseBitmap = true>
     void insert(page_range& pr) {
         auto addr = static_cast<void*>(&pr);
@@ -588,18 +663,24 @@ private:
             set_bits(pr, true);
         }
     }
+    /* 从_free_huge中移除page_range,必要时更新_not_empty
+     */
     void remove_huge(page_range& pr) {
         _free_huge.erase(_free_huge.iterator_to(pr));
         if (_free_huge.empty()) {
             _not_empty[max_order] = false;
         }
     }
+    /* 从_free中移除page_range,必要时更新_not_empty
+     */
     void remove_list(unsigned order, page_range& pr) {
         _free[order].erase(_free[order].iterator_to(pr));
         if (_free[order].empty()) {
             _not_empty[order] = false;
         }
     }
+    /* 根据page_range选择remove_huge或remove_list
+     */
     void remove(page_range& pr) {
         auto order = ilog2(pr.size / page_size);
         if (order >= max_order) {
@@ -609,11 +690,17 @@ private:
         }
     }
 
+    /* idx - page_range位于phys_mem开始的第idx个page
+     */
     unsigned get_bitmap_idx(page_range& pr) const {
         auto idx = reinterpret_cast<uintptr_t>(&pr);
         idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
         return idx / page_size;
     }
+    /* 每个page_range对应_bitmap特定的(size / page_size)项
+       fill = true  - 设置page_range对应的_bitmap所有项
+       fill = false - 设置page_range对应的_bitmap首位两项
+     */
     void set_bits(page_range& pr, bool value, bool fill = false) {
         auto end = pr.size / page_size - 1;
         if (fill) {
@@ -657,6 +744,9 @@ private:
 page_range_allocator free_page_ranges
     __attribute__((init_priority((int)init_prio::fpranges)));
 
+/* 通过free_page_range.alloc分配至少n * sizeof(T)大小的page_range
+   触发on_alloc更新内存计数
+ */
 template<typename T>
 T* page_range_allocator::bitmap_allocator<T>::allocate(size_t n)
 {
@@ -666,6 +756,9 @@ T* page_range_allocator::bitmap_allocator<T>::allocate(size_t n)
     return reinterpret_cast<T*>(pr);
 }
 
+/* 触发on_free更新内存计数
+   将free_page_ranges._deferred_free设置对应的page_range(并未立即释放)
+ */
 template<typename T>
 void page_range_allocator::bitmap_allocator<T>::deallocate(T* p, size_t n)
 {
@@ -676,20 +769,34 @@ void page_range_allocator::bitmap_allocator<T>::deallocate(T* p, size_t n)
     free_page_ranges._deferred_free = pr;
 }
 
+/* 从_free_huge或_free取出order合适(优先选size向上取整的可用order)的page_range
+   将page_range剩余部分加入_free
+ */
 template<bool UseBitmap>
 page_range* page_range_allocator::alloc(size_t size)
 {
+    /* exact_order大于或等于size实际需要的order
+       即在_free[exact_order-1]内可能存在满足的page_range
+     */
     auto exact_order = ilog2_roundup(size / page_size);
     if (exact_order > max_order) {
         exact_order = max_order;
     }
     auto bitset = _not_empty.to_ulong();
     if (exact_order) {
+        /* 将bitset后exact_order位全部置为0
+         */
         bitset &= ~((1 << exact_order) - 1);
     }
+    /* 计算bitset右边有几个连续0
+       order即表示_not_empty中大于或等于exact_order的最小可用order(右边第一个非零0索引)
+     */
     auto order = count_trailing_zeros(bitset);
 
     page_range* range = nullptr;
+    /* 不存在大于或等于exact_order的可用order
+       即只有_free[exact_order-1]可能存在可以满足的page_range
+     */
     if (!bitset) {
         if (!exact_order || _free[exact_order - 1].empty()) {
             return nullptr;
@@ -701,22 +808,38 @@ page_range* page_range_allocator::alloc(size_t size)
         for (auto&& pr : _free[exact_order - 1]) {
             if (pr.size >= size) {
                 range = &pr;
+                /* 此处既已找到合适的page_range,应当remove_list,然后跳到处理超额page_range部分
+                   直接break会返回null,相当于什么都没做,即意味着if(!bitset)永远返回nullptr
+                   应当是一个编码疏忽?修改方法: 
+                       [+]break前一行        - remove_list(order, *range)
+                       [+]return null;前一行 - if(!range) {\n    return null;\n}
+                       [-]return null;
+                 */
                 break;
             }
         }
         return nullptr;
     } else if (order == max_order) {
+        /* _free_huge中的page_range大小都一样,直接取第一个
+           若能满足,则直接从_free_huge中移除
+         */
         range = &*_free_huge.rbegin();
         if (range->size < size) {
             return nullptr;
         }
         remove_huge(*range);
     } else {
+        /* order有效时一定能满足,直接取第一个,并从_free中移除
+         */
         range = &_free[order].front();
         remove_list(order, *range);
     }
 
     auto& pr = *range;
+    /* 将分配的超额page_range多于部分作为一个新的page_range加入_free或_free_huge
+       (此处只可能加入_free)
+       UseBitmap有效时,设置page_range在_bitmap中的所有项为false
+     */
     if (pr.size > size) {
         auto& np = *new (static_cast<void*>(&pr) + size)
                         page_range(pr.size - size);
@@ -729,21 +852,37 @@ page_range* page_range_allocator::alloc(size_t size)
     return &pr;
 }
 
+/* 从大到小遍历order取出合适的page_range,并确保offset位置满足对齐
+   将page_range头尾多余部分重新加入_free
+ */
 page_range* page_range_allocator::alloc_aligned(size_t size, size_t offset,
                                                 size_t alignment, bool fill)
 {
     page_range* ret_header = nullptr;
+    /* 从大到小遍历所有order的所有page_range
+     */
     for_each(std::max(ilog2(size / page_size), 1u) - 1, [&] (page_range& header) {
         char* v = reinterpret_cast<char*>(&header);
         auto expected_ret = v + header.size - size + offset;
+        /* alignment_shift的意义在于确保offset所在位置对齐
+           header layout:
+               |  extra  | off | size-off | align |
+               |         |                        |
+             header <alignment>          header+header.size
+         */
         auto alignment_shift = expected_ret - align_down(expected_ret, alignment);
+
         if (header.size >= size + alignment_shift) {
+            /* 将header移除,将原header尾部的alignment作为新的header插入
+             */
             remove(header);
             if (alignment_shift) {
                 insert(*new (v + header.size - alignment_shift)
                             page_range(alignment_shift));
                 header.size -= alignment_shift;
             }
+            /* 原header除去alignment后若仍有剩余,从头部划分剩余部分作为新的header插入
+             */
             if (header.size == size) {
                 ret_header = &header;
             } else {
@@ -759,6 +898,8 @@ page_range* page_range_allocator::alloc_aligned(size_t size, size_t offset,
     return ret_header;
 }
 
+/* 尝试和线性地址相邻的前后page_range进行合并之后再加入_free_huge或_free
+ */
 void page_range_allocator::free(page_range* pr)
 {
     auto idx = get_bitmap_idx(*pr);
@@ -777,6 +918,11 @@ void page_range_allocator::free(page_range* pr)
     insert(*pr);
 }
 
+/* 先尝试与前一个相邻的page_range合并,然后加入_free_huge或_free
+   重设_bitmap大小,重置_bitmap
+   将_deferred_free通过free释放掉
+   若新增的page_range已存在,则通过free直接尝试合并后加入
+ */
 void page_range_allocator::initial_add(page_range* pr)
 {
     auto idx = get_bitmap_idx(*pr) + pr->size / page_size;
@@ -802,6 +948,9 @@ void page_range_allocator::initial_add(page_range* pr)
     }
 }
 
+/* 从_free_huge到_free[max_order], ..., _free[min_order],
+   对每一个page_range执行f
+ */
 template<typename Func>
 void page_range_allocator::for_each(unsigned min_order, Func f)
 {
@@ -819,6 +968,13 @@ void page_range_allocator::for_each(unsigned min_order, Func f)
     }
 }
 
+/* 确保minimum memory
+   通过free_page_ranges分配以page_size对齐的内存
+       alignment > page_size  - alloc_aligned
+       alignment <= page_size - alloc
+   若内存不足,允许block,会通过reclaimer_thread等待内存回收
+   返回实际分配的page_range + offset (sizeof(page_range) <= offset <= page_size)
+ */
 static void* malloc_large(size_t size, size_t alignment, bool block = true)
 {
     auto requested_size = size;
@@ -867,6 +1023,8 @@ void shrinker::activate_shrinker()
     _enabled = 1;
 }
 
+/* 每个shrinker实例都会记入reclaimer_thread._shrinkers
+ */
 shrinker::shrinker(std::string name)
     : _name(name)
 {
@@ -885,6 +1043,9 @@ void *osv_register_shrinker(const char *name,
     return reinterpret_cast<void *>(new c_shrinker(name, func));
 }
 
+/* 从大到小遍历order,对每一个page_range,尝试尽可能唤醒多的waiters
+   无waiters,或至少唤醒了一个waiters则返回true
+ */
 bool reclaimer_waiters::wake_waiters()
 {
     bool woken = false;
@@ -923,6 +1084,9 @@ bool reclaimer_waiters::wake_waiters()
     return woken;
 }
 
+/* 使用当前线程新建waiter加入_waiters,唤醒reclaimer_thread
+   (实质是通过reclaimer_thread._blocker唤醒)
+ */
 // Note for callers: Ideally, we would not only wake, but already allocate
 // memory here and pass it back to the waiter. However, memory is not always
 // allocated the same way (ex: refill_page_buffer is completely different from
@@ -963,6 +1127,8 @@ reclaimer::reclaimer()
     _thread->start();
 }
 
+/* 内存处于PRESSURE且存在active shrinkers时可以回收
+ */
 bool reclaimer::_can_shrink()
 {
     auto p = pressure_level();
@@ -975,6 +1141,8 @@ bool reclaimer::_can_shrink()
     return false;
 }
 
+/* 通过每个shrinker自定义的request_memory尝试回收
+ */
 void reclaimer::_shrinker_loop(size_t target, std::function<bool ()> hard)
 {
     // FIXME: This simple loop works only because we have a single shrinker
@@ -995,17 +1163,23 @@ void reclaimer::_shrinker_loop(size_t target, std::function<bool ()> hard)
     }
 }
 
+/* 依次尝试非hard, hard模式回收内存以唤醒waiters(hard模式无效则OOM)
+ */
 void reclaimer::_do_reclaim()
 {
     ssize_t target;
     emergency_alloc_level = 1;
 
     while (true) {
+        /* 回收的目标是使内存达到NORMAL
+         */
         WITH_LOCK(free_page_ranges_lock) {
             _blocked.wait(free_page_ranges_lock);
             target = bytes_until_normal();
         }
 
+        /* 优先尝试从JVM ballon中回收 - 非hard模式
+         */
         // This means that we are currently ballooning, we should
         // try to serve the waiters from temporary memory without
         // going on hard mode. A big batch of more memory is likely
@@ -1019,6 +1193,10 @@ void reclaimer::_do_reclaim()
             }
         }
 
+        /* 尝试JVM ballon之后依然存在waiters - hard模式
+               非成功唤醒waiters - OOM
+               成功唤醒waiters  - 尝试增加JVM ballon大小?
+         */
         _shrinker_loop(target, [this] { return _oom_blocked.has_waiters(); });
 
         WITH_LOCK(free_page_ranges_lock) {
@@ -1035,6 +1213,9 @@ void reclaimer::_do_reclaim()
     }
 }
 
+/* 通过free_page_ranges释放page_range(加入到_free_huge或_free)
+   page_range地址有特殊含义,表示真实的线性地址
+ */
 // Return a page range back to free_page_ranges. Note how the size of the
 // page range is range->size, but its start is at range itself.
 static void free_page_range_locked(page_range *range)
@@ -1058,12 +1239,18 @@ static void free_page_range(void *addr, size_t size)
     free_page_range(static_cast<page_range*>(addr));
 }
 
+/* 通过free_page_range释放
+   因为malloc_large返回page_range + offset(offset <= page_size),
+   所以此处使用obj - 1向下定位page_range
+ */
 static void free_large(void* obj)
 {
     obj = align_down(obj - 1, page_size);
     free_page_range(static_cast<page_range*>(obj));
 }
 
+/* 同free_large,使用obj - 1向下寻找header(page_range)以返回size
+ */
 static unsigned large_object_size(void *obj)
 {
     obj = align_down(obj - 1, page_size);
@@ -1090,6 +1277,8 @@ struct l1 {
         _fill_thread->start();
     }
 
+    /* 通过循环配合直接的refill确保alloc_page_local最终成功
+     */
     static void* alloc_page()
     {
         void* ret;
@@ -1099,6 +1288,8 @@ struct l1 {
         return ret;
     }
 
+    /* 通过循环配合直接的unfill确保free_page_local最终成功
+     */
     static void free_page(void* v)
     {
         while (!free_page_local(v)) {
@@ -1133,6 +1324,8 @@ private:
     void* _pages[max];
 };
 
+/* 可能存在无效的pages
+ */
 struct page_batch {
     // Number of pages per batch
     static constexpr size_t nr_pages = 32;
@@ -1167,6 +1360,8 @@ public:
        _fill_thread->start();
     }
 
+    /* 通过循环配合直接的refill确保try_alloc_page_batch最终成功
+     */
     page_batch* alloc_page_batch()
     {
         page_batch* pb;
@@ -1180,6 +1375,8 @@ public:
         return pb;
     }
 
+    /* 通过循环配合直接的refill确保try_free_page_batch最终成功
+     */
     void free_page_batch(page_batch* pb)
     {
         while (!try_free_page_batch(pb)) {
@@ -1191,6 +1388,10 @@ public:
         }
     }
 
+    /* batches低于watermark_lo唤醒_fill_thread
+       尝试从_stack取出一个batch
+       _stack为空会分配失败
+     */
     page_batch* try_alloc_page_batch()
     {
         if (get_nr() < _watermark_lo) {
@@ -1204,6 +1405,10 @@ public:
         return pb;
     }
 
+    /* batches高于watermark_hi唤醒_fill_thread
+       尝试向_stack加入一个batch
+       _stack已满会释放失败
+     */
     bool try_free_page_batch(page_batch* pb)
     {
         if (get_nr() > _watermark_hi) {
@@ -1249,6 +1454,8 @@ static inline l1& get_l1()
 
 class l2 global_l2;
 
+/* 在pages低于watermark_lo或高于watermark_hi时,执行refill或unfill(目标是max/2)
+ */
 // Percpu thread for L1 page pool
 void l1::fill_thread()
 {
@@ -1273,6 +1480,9 @@ void l1::fill_thread()
     }
 }
 
+/* 以max/2为目标尝试一次,从global_l2取出一个page_batch尝试加入_pages
+   _pages容量不足,则重新释放page_batch到global_l2
+ */
 void l1::refill()
 {
     SCOPE_LOCK(preempt_lock);
@@ -1294,6 +1504,8 @@ void l1::refill()
     }
 }
 
+/* 以max/2为目标尝试一次,从_pages取出多个pages形成一个page_batch释放到global_l2
+ */
 void l1::unfill()
 {
     SCOPE_LOCK(preempt_lock);
@@ -1307,6 +1519,10 @@ void l1::unfill()
     }
 }
 
+/* pages低于watermark_lo唤醒_fill_thread
+   尝试从_pages取出一个page
+   _pages为空会分配失败
+ */
 void* l1::alloc_page_local()
 {
     SCOPE_LOCK(preempt_lock);
@@ -1320,6 +1536,10 @@ void* l1::alloc_page_local()
     return pbuf.pop();
 }
 
+/* pages高于watermark_hi唤醒_fill_thread
+   尝试向_pages加入一个page
+   _pages已满会释放失败
+ */
 bool l1::free_page_local(void* v)
 {
     SCOPE_LOCK(preempt_lock);
@@ -1334,6 +1554,9 @@ bool l1::free_page_local(void* v)
     return true;
 }
 
+/* 等待所有(N个)l1线程和自身准备好
+   在batches低于watermark_lo或高于watermark_hi时,执行refill或unfill
+ */
 // Global thread for L2 page pool
 void l2::fill_thread()
 {
@@ -1356,6 +1579,10 @@ void l2::fill_thread()
     }
 }
 
+/* 以max/2为目标尝试多次,确保minimum memory,
+   从free_page_ranges分配多个pages形成一个batch尝试加入_stack
+   _stack容量不足,则重新释放batch到free_page_ranges
+ */
 void l2::refill()
 {
     page_batch batch;
@@ -1371,6 +1598,8 @@ void l2::refill()
                 // predictable.
                 reclaimer_thread.wait_for_memory(mmu::page_size);
             }
+            /* 此处一定能分配到一个batch?
+             */
             auto total_size = 0;
             for (size_t i = 0 ; i < page_batch::nr_pages; i++) {
                 batch.pages[i] = free_page_ranges.alloc(page_size);
@@ -1392,6 +1621,8 @@ void l2::refill()
     }
 }
 
+/* 以max/2为目标尝试多次,从_stack取出一个batch释放到free_page_ranges
+ */
 void l2::unfill()
 {
     page_batch batch;
@@ -1405,6 +1636,8 @@ void l2::unfill()
     }
 }
 
+/* 将page_batch中有效的pages释放到free_page_ranges
+ */
 void l2::free_batch(page_batch& batch)
 {
     WITH_LOCK(free_page_ranges_lock) {
@@ -1419,6 +1652,8 @@ void l2::free_batch(page_batch& batch)
 
 }
 
+/* 直接通过free_page_ranges分配
+ */
 static void* early_alloc_page()
 {
     WITH_LOCK(free_page_ranges_lock) {
@@ -1427,12 +1662,16 @@ static void* early_alloc_page()
     }
 }
 
+/* 直接通过free_page_ranges释放
+ */
 static void early_free_page(void* v)
 {
     auto pr = new (v) page_range(page_size);
     free_page_range(pr);
 }
 
+/* 根据smp_alloctor选择通过l1或free_page_ranges分配
+ */
 static void* untracked_alloc_page()
 {
     void* ret;
@@ -1453,6 +1692,8 @@ void* alloc_page()
     return p;
 }
 
+/* 根据smp_alloctor选择通过l1或free_page_ranges释放
+ */
 static inline void untracked_free_page(void *v)
 {
     trace_memory_page_free(v);
@@ -1468,6 +1709,9 @@ void free_page(void* v)
     tracker_forget(v);
 }
 
+/* 直接通过free_page_ranges分配,直接返回page_range没有offset
+   分配失败时(可能出现内存紧缺),唤醒reclaimer_thread
+ */
 /* Allocate a huge page of a given size N (which must be a power of two)
  * N bytes of contiguous physical memory whose address is a multiple of N.
  * Memory allocated with alloc_huge_page() must be freed with free_huge_page(),
@@ -1494,11 +1738,15 @@ void* alloc_huge_page(size_t N)
     }
 }
 
+/* 直接通过free_page_ranges释放,手动重写了page_range.size
+ */
 void free_huge_page(void* v, size_t N)
 {
     free_page_range(v, N);
 }
 
+/* 新增内存,更新内存计数,并向free_page_ranges加入新的内存
+ */
 void free_initial_memory_range(void* addr, size_t size)
 {
     if (!size) {
@@ -1541,6 +1789,11 @@ extern "C" {
     size_t malloc_usable_size(void *object);
 }
 
+/* size
+       (0, max_object_size]         - 从malloc_pools分配,并将地址移动到Mempool Area
+       (max_object_size, page_size] - 从l1或free_page_ranges分配,并将地址移动到Page Area
+       (page_size, ...)             - 从free_page_ranges分配
+ */
 static inline void* std_malloc(size_t size, size_t alignment)
 {
     if ((ssize_t)size < 0)
@@ -1564,6 +1817,8 @@ static inline void* std_malloc(size_t size, size_t alignment)
     return ret;
 }
 
+/* 通过malloc分配内存,然后通过memset置0
+ */
 void* calloc(size_t nmemb, size_t size)
 {
     if (nmemb == 0 || size == 0)
@@ -1578,6 +1833,12 @@ void* calloc(size_t nmemb, size_t size)
     return p;
 }
 
+/* Area
+       Main    - 寻找page_range,返回page_range的大小(此时page_range.size依然有效?)
+       Mempool - 寻找page_header,进而寻找pool,返回pool的大小
+       Page    - 返回page_size
+       Debug   - 寻找header,返回header的大小
+ */
 static size_t object_size(void *object)
 {
     switch (mmu::get_mem_area(object)) {
@@ -1596,6 +1857,8 @@ static size_t object_size(void *object)
     }
 }
 
+/* 通过malloc分配内存,然后通过memcpy进行内存拷贝,再通过free释放源object指向的内存
+ */
 static inline void* std_realloc(void* object, size_t size)
 {
     if (!object)
@@ -1616,6 +1879,12 @@ static inline void* std_realloc(void* object, size_t size)
     return ptr;
 }
 
+/* Area
+       Main    - 寻找page_range,释放到free_page_ranges(此时page_range.size依然有效?)
+       Mempool - 寻找page_header,进而寻找pool,释放到pool
+       Page    - 寻找page_header,释放到l1或free_page_ranges
+       Debug   -　使用dbg::free
+ */
 void free(void* object)
 {
     trace_memory_free(object);
@@ -1669,6 +1938,10 @@ static const size_t pad_after = mmu::page_size;
 
 static __thread bool recursed;
 
+/* 分配从debug_base开始的内存,地址永远向上增加
+   通过vpopulate分配
+   向分配的空间写入garbage和$用作调试
+ */
 void* malloc(size_t size, size_t alignment)
 {
     if (!enabled || recursed) {
@@ -1689,11 +1962,19 @@ void* malloc(size_t size, size_t alignment)
         auto asize = align_up(size, mmu::page_size);
         auto padded_size = pad_before + asize + pad_after;
         if (alignment > mmu::page_size) {
+            /* 为何此处添加alignment - page_size?
+             */
             // Our allocations are page-aligned - might need more
             padded_size += alignment - mmu::page_size;
         }
         char* v = free_area.fetch_add(padded_size, std::memory_order_relaxed);
         // change v so that (v + pad_before) is aligned.
+        /* Changes of v:
+               | align | pad_before | size | asize-size | pad_after |
+               v               <alignment>
+                       v
+                                    v
+         */
         v += align_up(v + pad_before, alignment) - (v + pad_before);
         mmu::vpopulate(v, mmu::page_size);
         new (v) header(size);
@@ -1707,6 +1988,9 @@ void* malloc(size_t size, size_t alignment)
     }
 }
 
+/* 检查调试内存是否未改动
+   通过vdepopulate和vcleanup释放
+ */
 void free(void* v)
 {
     assert(!recursed);
@@ -1732,11 +2016,15 @@ static inline size_t object_size(void* v)
 
 }
 
+/* 使用std_malloc或dbg::malloc
+ */
 void* malloc(size_t size)
 {
     static_assert(alignof(max_align_t) >= 2 * sizeof(size_t),
                   "alignof(max_align_t) smaller than glibc alignment guarantee");
     auto alignment = alignof(max_align_t);
+    /* size太小,将其按2的冪向上取整作为alignment
+     */
     if (alignment > size) {
         alignment = 1ul << ilog2_roundup(size);
     }
@@ -1750,6 +2038,8 @@ void* malloc(size_t size)
     return buf;
 }
 
+/* 使用std_realloc
+ */
 void* realloc(void* obj, size_t size)
 {
     void* buf = std_realloc(obj, size);
@@ -1757,6 +2047,8 @@ void* realloc(void* obj, size_t size)
     return buf;
 }
 
+/* 使用object_size
+ */
 size_t malloc_usable_size(void* obj)
 {
     if ( obj == nullptr ) {
@@ -1765,6 +2057,8 @@ size_t malloc_usable_size(void* obj)
     return object_size(obj);
 }
 
+/* 使用std_malloc或dbg::malloc
+ */
 // posix_memalign() and C11's aligned_alloc() return an aligned memory block
 // that can be freed with an ordinary free().
 
@@ -1821,6 +2115,8 @@ void enable_debug_allocator()
     dbg::enabled = true;
 }
 
+/* 使用malloc_large
+ */
 void* alloc_phys_contiguous_aligned(size_t size, size_t align, bool block)
 {
     assert(is_power_of_two(align));

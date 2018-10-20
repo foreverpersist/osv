@@ -124,6 +124,8 @@ void arch_setup_free_memory()
     // copy to stack so we don't free it now
     auto omb = *osv_multiboot_info;
     auto mb = omb.mb;
+    /* 使用主机的alloca从主机进程栈申请虚拟内存
+     */
     auto e820_buffer = alloca(mb.mmap_length);
     auto e820_size = mb.mmap_length;
     memcpy(e820_buffer, reinterpret_cast<void*>(mb.mmap_addr), e820_size);
@@ -173,12 +175,19 @@ void arch_setup_free_memory()
         } else if (ent.addr >= initial_map) {
             return;
         }
+        /* 添加主机地址低于1G的虚拟内存(截断了保留部分),作为OSv可以直接访问的物理内存
+         */
         mmu::free_initial_memory_range(ent.addr, ent.size);
     });
+    /* 映射各个Mem Area开始的1G虚拟空间,都指向相同的之前保留的一部分主机虚拟内存
+     */
     for (auto&& area : mmu::identity_mapped_areas) {
         auto base = reinterpret_cast<void*>(get_mem_area_base(area));
         mmu::linear_map(base, 0, initial_map, initial_map);
     }
+    /* 映射[elf_start, elf_start+elf_size]虚拟空间,
+       恰好指向之前保留的与其地址值相同的主机虚拟内存
+     */
     // map the core, loaded 1:1 by the boot loader
     mmu::phys elf_phys = reinterpret_cast<mmu::phys>(elf_header);
     elf_start = reinterpret_cast<void*>(elf_header);
@@ -196,6 +205,9 @@ void arch_setup_free_memory()
         if (intersects(ent, initial_map)) {
             ent = truncate_below(ent, initial_map);
         }
+        /* 映射各个Mem Area的虚拟空间,指向相同的主机虚拟内存
+           将主机虚拟内存添加为OSv的物理内存
+         */
         for (auto&& area : mmu::identity_mapped_areas) {
         auto base = reinterpret_cast<void*>(get_mem_area_base(area));
             mmu::linear_map(base + ent.addr, ent.addr, ent.size, ~0);

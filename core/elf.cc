@@ -46,6 +46,10 @@ const ulong program::core_module_index = 0;
 
 namespace {
 
+/* st_info使用一个char保存类型信息和绑定信息
+   | binding |   type  |
+   7         3         0
+ */
 unsigned symbol_type(Elf64_Sym& sym)
 {
     return sym.st_info & 15;
@@ -70,6 +74,8 @@ symbol_module::symbol_module(Elf64_Sym* _sym, object* _obj)
 {
 }
 
+/* 依据实际符号类型,解析重定位地址
+ */
 void* symbol_module::relocated_addr() const
 {
     void* base = obj->base();
@@ -119,11 +125,17 @@ object::~object()
     _prog.free_dtv(this);
 }
 
+/* _module_index为当前object在关联的program中的注册索引
+ */
 ulong object::module_index() const
 {
     return _module_index;
 }
 
+/* _visibility指向某个thread,或者null
+       指向thread - 私有,仅对此thread可见
+       指向null   - 共享
+ */
 bool object::visible(void) const
 {
     auto v = _visibility.load(std::memory_order_acquire);
@@ -137,6 +149,8 @@ void object::setprivate(bool priv)
 }
 
 
+/* 通过lookup_symbol寻找
+ */
 template <>
 void* object::lookup(const char* symbol)
 {
@@ -147,6 +161,9 @@ void* object::lookup(const char* symbol)
     return sm.relocated_addr();
 }
 
+/* 根据ELF Header中Section Table信息,直接从文件中读取Section Table
+   多次调用是否会出现缓存到内存拷贝,甚至磁盘到内存拷贝,影响性能?
+ */
 std::vector<Elf64_Shdr> object::sections()
 {
     size_t bytes = size_t(_ehdr.e_shentsize) * _ehdr.e_shnum;
@@ -160,6 +177,9 @@ std::vector<Elf64_Shdr> object::sections()
     return ret;
 }
 
+/* 取出String Table Section,拷贝至_section_names_cache
+   从_section_names_cache中读取节名称
+ */
 std::string object::section_name(const Elf64_Shdr& shdr)
 {
     if (_ehdr.e_shstrndx == SHN_UNDEF) {
@@ -174,17 +194,23 @@ std::string object::section_name(const Elf64_Shdr& shdr)
     return _section_names_cache.get() + shdr.sh_name;
 }
 
+/* 通过systab_len读取_dynamic_table信息
+ */
 std::vector<Elf64_Sym> object::symbols() {
     auto symtab = dynamic_ptr<Elf64_Sym>(DT_SYMTAB);
     auto len = symtab_len();
     return std::vector<Elf64_Sym>(symtab, symtab + len);
 }
 
+/* 从字符串表读取符号名称
+ */
 const char * object::symbol_name(const Elf64_Sym * sym) {
     auto strtab = dynamic_ptr<char>(DT_STRTAB);
     return strtab + sym->st_name;
 }
 
+/* 返回ELF Header中的e_entry
+ */
 void* object::entry_point() const {
     if (!_is_executable) {
         return nullptr;
@@ -192,6 +218,8 @@ void* object::entry_point() const {
     return _base + _ehdr.e_entry;
 }
 
+/* 指定fileref作为ELF文件
+ */
 file::file(program& prog, ::fileref f, std::string pathname)
     : object(prog, pathname)
     , _f(f)
@@ -204,6 +232,9 @@ file::~file()
 {
 }
 
+/* memory_image指定内存位置作为ELF的起点
+   似乎只有内核会使用?
+ */
 memory_image::memory_image(program& prog, void* base)
     : object(prog, "")
 {
@@ -227,6 +258,18 @@ void memory_image::read(Elf64_Off offset, void* data, size_t size)
     throw std::runtime_error("cannot load from Elf memory image");
 }
 
+/* 读取ELF Header
+   对ELF Header有严格限制
+       e_ident[EI_MAG0, EI_MAG3] = \x7fELF
+       e_ident[EI_CLASS]         = ELFCLASS64      (仅64位)
+       e_ident[EI_DATA]          = ELFDATA2LSB     (仅小端对齐)
+       e_ident[EI_VERSION]       = EV_CURRENT
+       e_ident[EI_OSABI]         = ELFOSABI_LINUX  (仅Linux架构)
+       e_type                    = ET_DYN          (仅共享文件)
+
+   为支持可执行文件,需要放宽
+       e_type = ET_DYN | ET_EXEC
+ */
 void file::load_elf_header()
 {
     try {
@@ -265,6 +308,8 @@ void file::load_elf_header()
     }
 }
 
+/* 检查文件大小后,直接通过文件接口read读取
+ */
 void file::read(Elf64_Off offset, void* data, size_t size)
 {
     // read(fileref, ...) is void, and crashes with assertion failure if the
@@ -284,6 +329,9 @@ void* align(void* addr, ulong align, ulong offset)
 
 }
 
+/* 设置_base, _end
+   考虑了Program Headers对齐
+ */
 void object::set_base(void* base)
 {
     auto p = std::min_element(_phdrs.begin(), _phdrs.end(),
@@ -308,6 +356,8 @@ void* object::end() const
     return _end;
 }
 
+/* 读取Program Header Table
+ */
 void file::load_program_headers()
 {
     _phdrs.resize(_ehdr.e_phnum);
@@ -318,6 +368,8 @@ void file::load_program_headers()
     }
 }
 
+/* 将文件一部分映射到内存,必要时填充0进行补齐,也可能映射一些空的匿名页
+ */
 void file::load_segment(const Elf64_Phdr& phdr)
 {
     ulong vstart = align_down(phdr.p_vaddr, mmu::page_size);
@@ -344,6 +396,8 @@ void file::load_segment(const Elf64_Phdr& phdr)
     }
 }
 
+/* 只要存在.note.osv-mlock节就需要mlocked
+ */
 bool object::mlocked()
 {
     for (auto&& s : sections()) {
@@ -354,6 +408,18 @@ bool object::mlocked()
     return false;
 }
 
+/* 读取Elf64_Note并解析name, descriptor域
+   原始Elf64_Note
+       namesz
+       descsz
+       type
+       <str>: | name | descriptor |
+              0    namesz    namesz+descsz
+   解析后Elf64_Note
+       n_owner  = name
+       n_value  = descriptor
+       n_type   = type
+ */
 Elf64_Note::Elf64_Note(void *_base, char *str)
 {
     Elf64_Word *base = reinterpret_cast<Elf64_Word *>(_base);
@@ -374,6 +440,17 @@ Elf64_Note::Elf64_Note(void *_base, char *str)
     }
 }
 
+/* 加载Program Headers
+       PT_LOAD    - 通过load_segment映射到内存
+       PT_DYNAMIC - 设置_dynamic_table地址
+       PT_INTERP  - 标记为可执行
+       PT_NOTE    - 仅支持OSv定义的注释
+       PT_TLS     - 设置_tls_segment, _tls_init_size, _tls_uninit_size
+       <OTHERS>   - 忽略或报非法错误
+
+    不支持使用TLS,编译时使用-pie的执行程序
+    实质是initial-exec/local-exec TLS model相关的bug,(OpenMP库libgomp即是一个例子)
+ */
 void object::load_segments()
 {
     for (unsigned i = 0; i < _ehdr.e_phnum; ++i) {
@@ -444,6 +521,8 @@ void object::load_segments()
     }
 }
 
+/* 解除内存映射
+ */
 void file::unload_segment(const Elf64_Phdr& phdr)
 {
     ulong vstart = align_down(phdr.p_vaddr, mmu::page_size);
@@ -454,6 +533,8 @@ void file::unload_segment(const Elf64_Phdr& phdr)
     mmu::munmap(_base + vstart + filesz, memsz - filesz);
 }
 
+/* 只处理PT_LOAD类型的Program Headers - 解除内存映射
+ */
 void object::unload_segments()
 {
     for (unsigned i = 0; i < _ehdr.e_phnum; ++i) {
@@ -468,6 +549,9 @@ void object::unload_segments()
      }
 }
 
+/* 将非PT_GUN_RELRO类型的Program Headers设置mprotect(perm_read)
+   只有实际被映射的Program Headers有效 - 即被映射的类型为PT_LOAD的Program Headers
+ */
 void object::fix_permissions()
 {
     for (auto&& phdr : _phdrs) {
@@ -503,6 +587,9 @@ bool object::dynamic_exists(unsigned tag)
     return _dynamic_tag(tag);
 }
 
+/* 在_dynamic_table中寻找
+   _dynamic_tab可能有重复的tag,如string array
+ */
 Elf64_Dyn* object::_dynamic_tag(unsigned tag)
 {
     if (!_dynamic_table) {
@@ -525,6 +612,9 @@ Elf64_Dyn& object::dynamic_tag(unsigned tag)
     return *r;
 }
 
+/* 在_dynamic_table寻找String Table
+   然后在_dynamic_table寻找string array的各项索引,配合String Table形成字符串
+ */
 std::vector<const char *>
 object::dynamic_str_array(unsigned tag)
 {
@@ -538,6 +628,9 @@ object::dynamic_str_array(unsigned tag)
     return r;
 }
 
+/* 还原一个函数?
+   何时需要还原?怎样(通过libc)还原?
+ */
 static std::string demangle(const char *name) {
     auto demangled = osv::demangle(name);
     std::string ret(name);
@@ -549,6 +642,9 @@ static std::string demangle(const char *name) {
     return ret;
 }
 
+/* 先从Symbol Table中寻找symbol,然后通过_prog.lookup寻找更有效更详细的symbol取代之
+   仅有STB_WEAK绑定类型的symbol允许_prog找不到,其他都应当找到
+ */
 symbol_module object::symbol(unsigned idx)
 {
     auto symtab = dynamic_ptr<Elf64_Sym>(DT_SYMTAB);
@@ -568,6 +664,9 @@ symbol_module object::symbol(unsigned idx)
     return ret;
 }
 
+/* 从绑定到相同的program的其他object中寻找
+   应当必定找到
+ */
 // symbol_other(idx) is similar to symbol(idx), except that the symbol is not
 // looked up in the object itself, just in the other objects.
 symbol_module object::symbol_other(unsigned idx)
@@ -595,6 +694,9 @@ symbol_module object::symbol_other(unsigned idx)
     return ret;
 }
 
+/* 从_dynamic_table取出DT_RELA表
+   解析每一项(type, sym, addr, addend),通过arch_relocate_rela处理(改写addr所指内存的内容)
+ */
 void object::relocate_rela()
 {
     auto rela = dynamic_ptr<Elf64_Rela>(DT_RELA);
@@ -616,6 +718,13 @@ void object::relocate_rela()
 
 extern "C" { void __elf_resolve_pltgot(void); }
 
+/* 从_dynamic_table去除DT_JMPREL表
+   解析每一项(sym, addr, addend),
+       通过arch_relocate_jump_slot设置addr内容
+       或使用original_plt设置addr内容
+       或使用_base设置addr内容
+   PLT, Original PLT, PLTGOT是什么?预连接是怎样的操作?
+ */
 void object::relocate_pltgot()
 {
     auto pltgot = dynamic_ptr<void*>(DT_PLTGOT);
@@ -670,6 +779,10 @@ void object::relocate_pltgot()
     pltgot[2] = reinterpret_cast<void*>(__elf_resolve_pltgot);
 }
 
+/* 从DT_JMPREL表读取重定位信息,寻找对应symbol
+   symbol属于其他object则将object加入_used_by_resolve_plt_got(记录依赖?)
+   通过arch_relocate_jump_slot设置addr内容
+ */
 void* object::resolve_pltgot(unsigned index)
 {
     assert(sched::preemptable());
@@ -696,6 +809,8 @@ void* object::resolve_pltgot(unsigned index)
     return *static_cast<void**>(addr);
 }
 
+/* 对DT_RELA和DT_JMPREL表逐项重定位
+ */
 void object::relocate()
 {
     assert(!dynamic_exists(DT_REL));
@@ -707,6 +822,8 @@ void object::relocate()
     }
 }
 
+/* 字符串的hash算法
+ */
 unsigned long
 elf64_hash(const char *name)
 {
@@ -721,6 +838,14 @@ elf64_hash(const char *name)
     return h;
 }
 
+/* 通过Hash Symbol Table快速查找Symbol Table中对应名称的symbol
+       Hash Symbol Table?
+           | count |  - info
+           ---------
+           | ....  |  - data
+           ---------
+           | ...   |  - rehash link
+ */
 Elf64_Sym* object::lookup_symbol_old(const char* name)
 {
     auto symtab = dynamic_ptr<Elf64_Sym>(DT_SYMTAB);
@@ -740,6 +865,8 @@ Elf64_Sym* object::lookup_symbol_old(const char* name)
     return nullptr;
 }
 
+/* 另一种字符串的hash算法
+ */
 uint_fast32_t
 dl_new_hash(const char *s)
 {
@@ -750,6 +877,19 @@ dl_new_hash(const char *s)
     return h & 0xffffffff;
 }
 
+/* 通过GNU Hash Symbol Table快速查找Symbol Table中对应的symbol
+       GNU Hash Symbol Table?
+           | count  |  - (just reference)
+           | symndx |  - info
+           | mask   |
+           | shift  |
+           ----------
+           |  ...   |  - data
+           ----------
+           |        |  - (overlap?)
+           ----------
+           |  ...   |  - rehash link
+ */
 Elf64_Sym* object::lookup_symbol_gnu(const char* name)
 {
     auto symtab = dynamic_ptr<Elf64_Sym>(DT_SYMTAB);
@@ -785,6 +925,9 @@ Elf64_Sym* object::lookup_symbol_gnu(const char* name)
     return nullptr;
 }
 
+/* 根据是否含有DT_GUN_HASH表选择lookup_symbol_gun或lookup_symbol_old查找
+   二者hash表组织的方式略有差异,使用的hash算法不同
+ */
 Elf64_Sym* object::lookup_symbol(const char* name)
 {
     if (!visible()) {
@@ -802,6 +945,8 @@ Elf64_Sym* object::lookup_symbol(const char* name)
     return sym;
 }
 
+/* 返回Hash Table或GUN Hash Table有效项数目
+ */
 unsigned object::symtab_len()
 {
     if (dynamic_exists(DT_HASH)) {
@@ -828,6 +973,8 @@ unsigned object::symtab_len()
     return len;
 }
 
+/* 寻找指定地址处的符号(OBJECT|FUNC),地址位于符号起止区间内
+ */
 dladdr_info object::lookup_addr(const void* addr)
 {
     dladdr_info ret;
@@ -881,6 +1028,8 @@ static std::string dirname(std::string path)
     return path.substr(0, pos);
 }
 
+/* 通过_prog.load_object从DT_RPATH指定路径中加载依赖,并将成功加载的依赖记入_needed
+ */
 void object::load_needed(std::vector<std::shared_ptr<object>>& loaded_objects)
 {
     std::vector<std::string> rpath;
@@ -902,6 +1051,8 @@ void object::load_needed(std::vector<std::shared_ptr<object>>& loaded_objects)
     }
 }
 
+/* 清空_needed, _used_by_resolve_plt_got
+ */
 void object::unload_needed()
 {
     _needed.clear();
@@ -913,6 +1064,9 @@ ulong object::get_tls_size()
     return _tls_init_size + _tls_uninit_size;
 }
 
+/* 把当前对象加入ds,对不存在于ds中的_needed项递归处理
+   即从上至下,递归地将所有依赖记入ds
+ */
 void object::collect_dependencies(std::unordered_set<elf::object*>& ds)
 {
     ds.insert(this);
@@ -938,6 +1092,8 @@ std::string object::pathname()
     return _pathname;
 }
 
+/* 调用DT_INIT, DT_INIT_ARRAY描述的所有初始functions,原型为void (*)(int, char**)
+ */
 // Run the object's static constructors or similar initialization
 void object::run_init_funcs(int argc, char** argv)
 {
@@ -958,6 +1114,8 @@ void object::run_init_funcs(int argc, char** argv)
     }
 }
 
+/* 调用DT_FINI_ARRAY, DT_FINI描述的所有终止functions,原型为void (*)()
+ */
 // Run the object's static destructors or similar finalization
 void object::run_fini_funcs()
 {
@@ -977,6 +1135,9 @@ void object::run_fini_funcs()
     }
 }
 
+/* 返回当前线程拥有的_tls[_module_index],必要时在当前线程空间新建_tls[_module_index]
+   每个线程都有一份相同的_tls[]?
+ */
 void* object::tls_addr()
 {
     auto t = sched::thread::current();
@@ -987,6 +1148,10 @@ void* object::tls_addr()
     return r;
 }
 
+/* 直接分配(_static_tls_alloc, _static_tls_alloc + tls_size)
+   更新_static_tls_alloc记录已分配的空间
+   不对应真实内存地址,object及其依赖使用同一块内存
+ */
 void object::alloc_static_tls()
 {
     auto tls_size = get_tls_size();
@@ -1001,6 +1166,9 @@ bool object::is_core()
     return _prog._core.get() == this;
 }
 
+/* 统计自身及所有依赖最大的static_tls_end,对齐后作为_initial_tls_size
+   重置_initial_tls大小,让自身及所有依赖在_initial_t上prepare_initial_tls(写入_tls_segment及0)
+ */
 void object::init_static_tls()
 {
     std::unordered_set<object*> deps;
@@ -1039,6 +1207,10 @@ void create_main_program()
     s_program = new elf::program();
 }
 
+/* 新建地址为ELF_IMAGE_START(OSV_KERNEL_BASE)的memory_image设置为_core - 表示内核本身?
+   每个program都会持有自己独立的_core实例,但实际指向相同的内存区间
+   _core内包含了一系列预定义的动态库
+ */
 program::program(void* addr)
     : _next_alloc(addr)
 {
@@ -1046,6 +1218,9 @@ program::program(void* addr)
     assert(_core->module_index() == core_module_index);
     _core->load_segments();
     set_search_path({"/", "/usr/lib"});
+    /* 设置_files中预定义动态库对应的object都为_core
+       向_modules_rcu加入一个仅包含_core的modules_list
+     */
     // Our kernel already supplies the features of a bunch of traditional
     // shared libraries:
     static const auto supplied_modules = {
@@ -1103,6 +1278,11 @@ static std::string canonicalize(std::string p)
     }
 }
 
+/* 确保加载指定库
+      已加载 - <Do nothing>
+      未加载 - 新建object记入_modules_rcu, _files,
+              加载Program Headers,加载依赖(递归操作),重定位,处理mprotect
+ */
 // This is the part of program::get_library() which loads an object and all
 // its dependencies, but doesn't yet run the objects' init functions. We can
 // only do this after loading all the dependent objects, as we need to run the
@@ -1115,12 +1295,17 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
         std::vector<std::shared_ptr<object>> &loaded_objects)
 {
     fileref f;
+    /* _files存在有效的object,直接返回
+     */
     if (_files.count(name)) {
         auto obj = _files[name].lock();
         if (obj) {
             return obj;
         }
     }
+    /* 仅有文件名,在extra_path和_search_path下搜索
+       含有目录,使用绝对路径查找
+     */
     if (name.find('/') == name.npos) {
         std::vector<std::string> search_path;
         search_path.insert(search_path.end(), extra_path.begin(), extra_path.end());
@@ -1141,6 +1326,8 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
         f = fileref_from_fname(name);
     }
 
+    /* 查找过程中,被其他线程成功加载,直接返回
+     */
     if (_files.count(name)) {
         auto obj = _files[name].lock();
         if (obj) {
@@ -1153,6 +1340,10 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
                 [=](object *obj) { remove_object(obj); });
         ef->set_base(_next_alloc);
         ef->setprivate(true);
+        /* 将ef加入到modules_rcu倒数第二位置(kernel之前), 也同时加入到loaded_objects以返回
+           通过load_needed递归加载其依赖,并记入loaded_objects
+           将ef记入_files
+         */
         // We need to push the object at the end of the list (so that the main
         // shared object gets searched before the shared libraries it uses),
         // with one exception: the kernel needs to remain at the end of the
@@ -1180,6 +1371,10 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
     }
 }
 
+/* 通过load_object确保库加载,将新加载的库记入_loaded_objects_stack
+   尝试初始化static TLS
+   可能会执行初始functions
+ */
 std::shared_ptr<object>
 program::get_library(std::string name, std::vector<std::string> extra_path, bool delay_init)
 {
@@ -1211,6 +1406,10 @@ program::get_library(std::string name, std::vector<std::string> extra_path, bool
     return ret;
 }
 
+/* 取出_loaded_objects_stack最新的loaded_objects
+   按相反顺序逐一执行object的初始functions,执行前后先取消private再重新设置private为当前线程
+   最终的private是否可能与加载时关联的线程不同?
+ */
 void program::init_library(int argc, char** argv)
 {
     // Get the list of pointers to shared objects from stack before iterating on them
@@ -1235,6 +1434,10 @@ void program::init_library(int argc, char** argv)
     }
 }
 
+/* 执行中止functions,从_files, modules_rcu中移除,中间确保CPU RCU同步
+   清空依赖
+   加入到_modules_to_delete,通过module_delete_enable解除Program Headers内存映射
+ */
 void program::remove_object(object *ef)
 {
     SCOPE_LOCK(_mutex);
@@ -1295,6 +1498,8 @@ void program::del_debugger_obj(object* obj)
     }
 }
 
+/* 从所有的库中寻找symbol
+ */
 symbol_module program::lookup(const char* name)
 {
     trace_elf_lookup(name);
@@ -1311,6 +1516,8 @@ symbol_module program::lookup(const char* name)
     return ret;
 }
 
+/* 在所有库中寻找function
+ */
 void* program::do_lookup_function(const char* name)
 {
     auto sym = lookup(name);
@@ -1323,6 +1530,8 @@ void* program::do_lookup_function(const char* name)
     return sym.relocated_addr();
 }
 
+/* 在所有库中寻找symbol(OBJECT|FUNC)
+ */
 dladdr_info program::lookup_addr(const void* addr)
 {
     trace_elf_lookup_addr(addr);
@@ -1340,6 +1549,8 @@ dladdr_info program::lookup_addr(const void* addr)
     return ret;
 }
 
+/* 在所有库中寻找addr所属的object
+ */
 object *program::object_containing_addr(const void *addr)
 {
     object *ret = nullptr;
@@ -1357,6 +1568,9 @@ object *program::object_containing_addr(const void *addr)
     return ret;
 }
 
+/* 返回当前app的program或单例s_program
+   app的progam可能是一个独立的program实例?
+ */
 program* get_program()
 {
     auto app = sched::thread::current_app();
@@ -1368,6 +1582,8 @@ program* get_program()
     return s_program;
 }
 
+/* 与object::lookup_symbol_old基本相同
+ */
 const Elf64_Sym *init_dyn_tabs::lookup(u32 sym)
 {
     auto nbucket = this->hashtab[0];
@@ -1388,6 +1604,10 @@ const Elf64_Sym *init_dyn_tabs::lookup(u32 sym)
     return nullptr;
 };
 
+/* 读取ELF信息
+       DYNAMIC - Init Array, Symbol Table, Hash Table, String Table, Rela
+       TLS
+ */
 init_table get_init(Elf64_Ehdr* header)
 {
     void* pbase = static_cast<void*>(header);
@@ -1473,6 +1693,8 @@ init_table get_init(Elf64_Ehdr* header)
     return ret;
 }
 
+/* 将obj加入_module_index_list_rcu第一个空白位置,返回位置
+ */
 ulong program::register_dtv(object* obj)
 {
     SCOPE_LOCK(_module_index_list_mutex);
@@ -1494,6 +1716,8 @@ ulong program::register_dtv(object* obj)
     }
 }
 
+/* 将_module_index_list_rcu对应位置置为nullptr
+ */
 void program::free_dtv(object* obj)
 {
     SCOPE_LOCK(_module_index_list_mutex);
@@ -1503,6 +1727,8 @@ void program::free_dtv(object* obj)
     *i = nullptr;
 }
 
+/* 返回_modules_rcu的副本
+ */
 // Used in implementation of program::with_modules. We cannot keep the RCU
 // read lock (which disables preemption) while a user function is running,
 // so we use this function to make a copy the current list of modules.
@@ -1579,12 +1805,16 @@ struct module_and_offset {
     ulong offset;
 };
 
+/* 在当前线程空间设置TLS
+ */
 char *object::setup_tls()
 {
     return (char *) sched::thread::current()->setup_tls(
             _module_index, _tls_segment, _tls_init_size, _tls_uninit_size);
 }
 
+/* 返回TLS地址,必要时在当前线程空间设置TLS
+ */
 extern "C"
 void* __tls_get_addr(module_and_offset* mao)
 {
@@ -1610,6 +1840,8 @@ void* __tls_get_addr(module_and_offset* mao)
 // also uses a static area for uname, we can just return that.
 extern utsname utsname;
 
+/* 返回type对应的值(常量)
+ */
 extern "C"
 unsigned long getauxval(unsigned long type)
 {

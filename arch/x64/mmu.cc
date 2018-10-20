@@ -161,6 +161,9 @@ bool is_page_fault_prot_write(unsigned int error_code) {
     return (error_code & (page_fault_write | page_fault_prot)) == (page_fault_write | page_fault_prot);
 }
 
+/* 错误码包含page_fault_rsvd,
+   或错误码包含page_fault_write|page_fault_prot且存在非COW的只读page时,返回true
+ */
 bool fast_sigsegv_check(uintptr_t addr, exception_frame* ef)
 {
     if (is_page_fault_rsvd(ef->get_error())) {

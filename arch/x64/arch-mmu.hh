@@ -18,11 +18,18 @@ enum class mattr {
 };
 constexpr mattr mattr_default = mattr::normal;
 
+/* 返回值
+       0...0  1...1 !large 1...1
+       |   |  |   |    |   |   |
+      63  51 50  13   12  11   0
+ */
 constexpr uint64_t pte_addr_mask(bool large)
 {
     return ((1ull << max_phys_bits) - 1) & ~(0xfffull) & ~(uint64_t(large) << page_size_shift);
 }
 
+/* 直接继承pt_element_common,重写了内部方法
+ */
 template<int N>
 class pt_element : public pt_element_common<N> {
 public:
@@ -30,6 +37,16 @@ public:
     explicit pt_element(u64 x) noexcept : pt_element_common<N>(x) {}
 };
 
+/* x的每位含义
+        7 -  0 | large  | dirty  |accessed|        |        |  user  | write  | valid  |
+       15 -  8 |        |        |        |        |        |        |        |        |
+       23 - 16 |        |        |        |        |        |        |        |        |
+       31 - 24 |        |        |        |        |        |        |        |        |
+       39 - 32 |        |        |        |        |        |        |        |        |
+       47 - 40 |        |        |        |        |        |        |        |        |
+       55 - 48 | sw + 2 | sw + 1 | sw + 0 |        |  rsvd  |        |        |        |
+       63 - 56 |!execute| sw + 9 | sw + 8 | sw + 7 | sw + 6 | sw + 5 | sw + 4 | sw + 3 |
+ */
 /* common interface implementation */
 
 template<int N>
@@ -67,21 +84,29 @@ inline bool pt_element_common<N>::rsvd_bit(unsigned off) const {
     return (x >> (51 - off)) & 1;
 }
 
+/* 取第50-0位,第12位在large时置0
+ */
 template<int N>
 inline phys pt_element_common<N>::addr() const {
     return x & pte_addr_mask(large());
 }
 
+/* 取addr的第50-12位
+ */
 template<int N>
 inline u64 pt_element_common<N>::pfn() const {
     return addr() >> page_size_shift;
 }
 
+/* 要求非large,直接返回addr
+ */
 template<int N>
 inline phys pt_element_common<N>::next_pt_addr() const {
     assert(!large());
     return addr();
 }
+/* 要求非large,直接返回pfn
+ */
 template<int N>
 inline u64 pt_element_common<N>::next_pt_pfn() const {
     assert(!large());
@@ -115,16 +140,23 @@ inline void pt_element_common<N>::set_rsvd_bit(unsigned off, bool v) {
     set_bit(51 - off, v);
 }
 
+/* 保留第63-51位,设置第12位(large),再进行 或运算
+ */
 template<int N>
 inline void pt_element_common<N>::set_addr(phys addr, bool large) {
     x = (x & ~pte_addr_mask(large)) | addr;
 }
 
+/* 同上,只是设置位置从第12位起
+ */
 template<int N>
 inline void pt_element_common<N>::set_pfn(u64 pfn, bool large) {
     set_addr(pfn << page_size_shift, large);
 }
 
+/* 创建一个pt_element,设置相应的标志位
+   N > 1时需要设置leaf = false
+ */
 // Currently mem_attr is ignored on x86_64
 template<int N>
 pt_element<N> make_pte(phys addr, bool leaf, unsigned perm = perm_rwx,

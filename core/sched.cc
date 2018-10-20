@@ -138,6 +138,10 @@ private:
     std::unique_ptr<thread> _thread;
 };
 
+/* 为局部percpu_base分配线性空间,并使用memcpy复制[_percpu_start, _percpu_end]内容
+   设置局部percpu_base值为实际线性空间距_percpu_start的偏移
+   使用CPU0的局部percpu_base设置全局percpu_base
+ */
 cpu::cpu(unsigned _id)
     : id(_id)
     , preemption_timer(*this)
@@ -158,6 +162,8 @@ cpu::cpu(unsigned _id)
     }
 }
 
+/* 新建爱绑定在此CPU上的idle_thread(执行idle)
+ */
 void cpu::init_idle_thread()
 {
     running_since = osv::clock::uptime::now();
@@ -166,6 +172,8 @@ void cpu::init_idle_thread()
     idle_thread->set_priority(thread::priority_idle);
 }
 
+/* 取32位的running_since, total_cpu_time高22位,拼接到64位的_cputime_estimator
+ */
 // Estimating a *running* thread's total cpu usage (in thread::thread_clock())
 // requires knowing a pair [running_since, cpu_time_at_running_since].
 // Since we can't read a pair of u64 values atomically, nor want to slow down
@@ -184,10 +192,18 @@ void thread::cputime_estimator_set(
     u32 tc = total_cpu_time.count() >> cputime_shift;
     _cputime_estimator.store(rs | ((u64)tc << 32), std::memory_order_relaxed);
 }
+/* 从_cputime_estimator中恢复running_since, total_cpu_time
+ */
 void thread::cputime_estimator_get(
         osv::clock::uptime::time_point &running_since,
         osv::clock::uptime::duration &total_cpu_time)
 {
+    /* 拆分_cputime_estimator
+           |  |  |  |  |
+           63 53 32 21 0
+       rs - 第21-0位,右侧补12个0
+       tc - 第53-32位,右侧补12个0
+     */
     u64 e = _cputime_estimator.load(std::memory_order_relaxed);
     u64 rs = ((u64)(u32) e) << cputime_shift;
     u64 tc = (e >> 32) << cputime_shift;
@@ -202,6 +218,13 @@ void thread::cputime_estimator_get(
     // this correctly, we need to assume that less than 2^(32+cputime_shift-1)
     // ns have passed since the estimator was saved. This is 2200 seconds for
     // cputime_shift=10, way longer than our typical context switches.
+    /* ho:
+           1...1  0...0  0...0
+           |   |  |   |  |   |
+           63  42 41  32 31  0
+       rs_ho - rs_ref高22位
+       tc_ho - tc_ref高22位
+     */
     constexpr u64 ho = (std::numeric_limits<u64>::max() &
             ~(std::numeric_limits<u64>::max() >> (64 - 32 - cputime_shift)));
     u64 rs_ref = osv::clock::uptime::now().time_since_epoch().count();
@@ -219,6 +242,8 @@ void thread::cputime_estimator_get(
     total_cpu_time = osv::clock::uptime::duration(tc_ho | tc);
 }
 
+/* 在当前CPU上重新调度reschedule_from_interrupt
+ */
 // Note that this is a static (class) function, which can only reschedule
 // on the current CPU, not on an arbitrary CPU. Allowing to run one CPU's
 // scheduler on a different CPU would be disastrous.
@@ -229,12 +254,17 @@ void cpu::schedule()
     }
 }
 
+/* 尝试handle_incoming_wakeups以填充runqueue
+   选择继续执行当前线程或切换到新线程,并更新运行时间等计数
+ */
 void cpu::reschedule_from_interrupt(bool called_from_yield,
                                     thread_runtime::duration preempt_after)
 {
     trace_sched_sched();
     assert(sched::exception_depth <= 1);
     need_reschedule = false;
+    /* 尝试填充runqueue
+     */
     handle_incoming_wakeups();
 
     auto now = osv::clock::uptime::now();
@@ -251,6 +281,8 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
     const auto p_status = p->_detached_state->st.load();
     assert(p_status != thread::status::queued);
 
+    /* 更新当前线程的CPU总时间和运行时间
+     */
     p->_total_cpu_time += interval;
     p->_runtime.ran_for(interval);
 
@@ -261,6 +293,8 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
             preemption_timer.cancel();
             return;
         } else if (!called_from_yield) {
+            /* 当前线程运行时间依然最小,计算下一次抢占时间,继续让其运行
+             */
             auto &t = *runqueue.begin();
             if (p->_runtime.get_local() < t._runtime.get_local()) {
                 preemption_timer.cancel();
@@ -271,6 +305,8 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
                 return;
             }
         }
+        /* 恢复当前线程的运行时间
+         */
         // If we're here, p no longer has the lowest runtime. Before queuing
         // p, return the runtime it borrowed for hysteresis.
         p->_runtime.hysteresis_run_stop();
@@ -283,6 +319,8 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
         trace_sched_preempt();
         p->stat_preemptions.incr();
     } else {
+        /* 当前线程本就不在运行,恢复当前线程的运行时间
+         */
         // p is no longer running, so we'll switch to a different thread.
         // Return the runtime p borrowed for hysteresis.
         p->_runtime.hysteresis_run_stop();
@@ -308,11 +346,15 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
 
     trace_sched_load(runqueue.size());
 
+    /* 选中runqueue第一个线程
+     */
     n->_detached_state->st.store(thread::status::running);
     n->_runtime.hysteresis_run_start();
 
     assert(n!=p);
 
+    /* 原来非idle线程加入runqueue后,对选中的线程增加切换惩罚
+     */
     if (p->_detached_state->st.load(std::memory_order_relaxed) == thread::status::queued
             && p != idle_thread) {
         n->_runtime.add_context_switch_penalty();
@@ -330,12 +372,18 @@ void cpu::reschedule_from_interrupt(bool called_from_yield,
         preemption_timer.set(now + preempt_after);
     }
 
+    /* 设置app_thread
+     */
     if (app_thread.load(std::memory_order_relaxed) != n->_app) { // don't write into a cache line if it can be avoided
         app_thread.store(n->_app, std::memory_order_relaxed);
     }
+    /* 刷新TLB
+     */
     if (lazy_flush_tlb.exchange(false, std::memory_order_seq_cst)) {
         mmu::flush_tlb_local();
     }
+    /* 实际线程切换
+     */
     n->switch_to();
 
     // Note: after the call to n->switch_to(), we should no longer use any of
@@ -372,6 +420,8 @@ void cpu::idle_poll_end()
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
+/* idle_poll未开始时,向此CPU发送CPU间中断
+ */
 void cpu::send_wakeup_ipi()
 {
     std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -381,6 +431,10 @@ void cpu::send_wakeup_ipi()
     }
 }
 
+/* 多次尝试handle_incoming_wakeups以填充runqueue
+   最后等待中断,再尝试一次handle_incoming_wakeups
+   runqueue非空就会返回
+ */
 void cpu::do_idle()
 {
     do {
@@ -408,6 +462,9 @@ void cpu::do_idle()
 
 void start_early_threads();
 
+/* 执行一次schedule,启动thread_map中的线程
+   然后循环do_idle, schedule
+ */
 void cpu::idle()
 {
     // The idle thread must not sleep, because the whole point is that the
@@ -426,6 +483,11 @@ void cpu::idle()
     }
 }
 
+/* 处理incoming_wakeups内线程
+       当前线程      - 设置running状态
+       非此CPU的线程 - 忽略
+       此CPU的线程   - 更新其运行时间,加入runqueue,将其_active_timers加入当前CPU的timers
+ */
 void cpu::handle_incoming_wakeups()
 {
     cpu_set queues_with_wakes{incoming_wakeups_mask.fetch_clear()};
@@ -469,6 +531,8 @@ void cpu::enqueue(thread& t)
     runqueue.insert_equal(t);
 }
 
+/* 初始化硬件层面CPU
+ */
 void cpu::init_on_cpu()
 {
     arch.init_on_cpu();
@@ -480,6 +544,9 @@ unsigned cpu::load()
     return runqueue.size();
 }
 
+/* 设置当前线程的pin相关属性后,让当前CPU重新调度
+   通过临时线程唤醒
+ */
 // function to pin the *current* thread:
 void thread::pin(cpu *target_cpu)
 {
@@ -526,6 +593,8 @@ void thread::pin(cpu *target_cpu)
     // wakeme will be implicitly join()ed here.
 }
 
+/* 使用运行在t所在CPU上的helper线程设置线程的pin相关属性,唤醒线程
+ */
 // function to pin another thread:
 void thread::pin(thread *t, cpu *target_cpu)
 {
@@ -539,6 +608,8 @@ void thread::pin(thread *t, cpu *target_cpu)
     // re-used an existing thread (e.g., the load balancer thread).
     std::unique_ptr<thread> helper(thread::make([&] {
         WITH_LOCK(irq_lock) {
+            /* 将helper线程移动到t所在CPU上
+             */
             // This thread started on the same CPU as t, but by now t might
             // have moved. If that happened, we need to move too.
             while (sched::cpu::current() != t->tcpu()) {
@@ -555,11 +626,15 @@ void thread::pin(thread *t, cpu *target_cpu)
                 // migration_disable() is in force.
                 t->_migration_lock_counter--;
             }
+            /* t就在目标CPU上
+             */
             if (t->tcpu() == target_cpu) {
                 t->_migration_lock_counter++;
                 t->_pinned = true;
                 return;
             }
+            /* 等待t可迁移
+             */
             // The target thread might be temporarily holding a migration lock
             // and we must not migrate it in the middle of this. Currently we
             // sleep a bit and retry, I don't know if there's a better way.
@@ -594,6 +669,8 @@ void thread::pin(thread *t, cpu *target_cpu)
             case status::prestarted:
             case status::sending_lock:
             case status::waking:
+                /* 设置pin相关属性后,切为waiting状态,再次执行唤醒
+                 */
                 trace_sched_migrate(t, target_cpu->id);
                 t->stat_migrations.incr();
                 t->suspend_timers();
@@ -609,6 +686,8 @@ void thread::pin(thread *t, cpu *target_cpu)
                 }
                 break;
             case status::queued:
+                /* 从当前CPU的runqueue中移除,设置pin相关属性后,切为waiting状态,再次执行唤醒
+                 */
                 current_cpu->runqueue.erase(current_cpu->runqueue.iterator_to(*t));
                 trace_sched_migrate(t, target_cpu->id);
                 t->stat_migrations.incr();
@@ -632,12 +711,16 @@ void thread::pin(thread *t, cpu *target_cpu)
     helper->join();
 }
 
+/*  直接或通过运行在相同CPU上的helper线程清除pin相关属性
+ */
 void thread::unpin()
 {
     // Unpinning the current thread is straightforward. But to work on a
     // different thread safely, without risking races with concurrent attempts
     // to pin, unpin, or migrate the same thread, we need to run the actual
     // unpinning code on the same CPU as the target thread.
+    /* 恰好是当前线程,清除_pinned,减少_migration_lock_counter
+     */
     if (this == current()) {
         WITH_LOCK(preempt_lock) {
             if (_pinned) {
@@ -650,6 +733,8 @@ void thread::unpin()
     }
     std::unique_ptr<thread> helper(thread::make([this] {
         WITH_LOCK(preempt_lock) {
+            /* 将helper移动到t所在CPU上
+             */
             // helper thread started on the same CPU as "this", but by now
             // "this" might migrated. If that happened helper need to migrate.
             while (sched::cpu::current() != this->tcpu()) {
@@ -657,6 +742,8 @@ void thread::unpin()
                     thread::pin(this->tcpu());
                 }
             }
+            /* 清除_pinned,减少_migration_lock_counter--
+             */
             if (_pinned) {
                 _pinned = false;
                  std::atomic_signal_fence(std::memory_order_release);
@@ -668,6 +755,9 @@ void thread::unpin()
     helper->join();
 }
 
+/* 从runqueue里选出一个_migration_lock_counter为0的线程,
+   迁移到load最小的CPU(至少比当前CPU的load少2)上
+ */
 void cpu::load_balance()
 {
     notifier::fire();
@@ -678,6 +768,8 @@ void cpu::load_balance()
         if (runqueue.empty()) {
             continue;
         }
+        /* 选出runqueue最小的CPU
+         */
         auto min = *std::min_element(cpus.begin(), cpus.end(),
                 [](cpu* c1, cpu* c2) { return c1->load() < c2->load(); });
         if (min == this) {
@@ -689,6 +781,8 @@ void cpu::load_balance()
             continue;
         }
         WITH_LOCK(irq_lock) {
+            /* 从runqueue选出一个_migration_lock_counter为0的线程
+             */
             auto i = std::find_if(runqueue.rbegin(), runqueue.rend(),
                     [](thread& t) { return t._migration_lock_counter == 0; });
             if (i == runqueue.rend()) {
@@ -717,6 +811,8 @@ void cpu::load_balance()
     }
 }
 
+/* 每个notifier实例都会加入到_notifiers
+ */
 cpu::notifier::notifier(std::function<void ()> cpu_up)
     : _cpu_up(cpu_up)
 {
@@ -732,6 +828,8 @@ cpu::notifier::~notifier()
     }
 }
 
+/* 执行_notifiers中每个notifier的回调_cpu_up
+ */
 void cpu::notifier::fire()
 {
     WITH_LOCK(_mtx) {
@@ -741,6 +839,8 @@ void cpu::notifier::fire()
     }
 }
 
+/* 当前CPU的runqueue有非idle线程时,触发重新调度选择新线程运行
+ */
 void thread::yield(thread_runtime::duration preempt_after)
 {
     trace_sched_yield();
@@ -805,6 +905,8 @@ std::unordered_map<id_type, thread *> thread_map
 
 static thread_runtime::duration total_app_time_exited(0);
 
+/* 返回线程的CPU时间
+ */
 thread_runtime::duration thread::thread_clock() {
     if (this == current()) {
         WITH_LOCK (preempt_lock) {
@@ -836,6 +938,8 @@ thread_runtime::duration thread::thread_clock() {
     }
 }
 
+/* 返回此进程(OSv只有唯一进程)除idle_threads以外的CPU总时间
+ */
 // Return the total amount of cpu time used by the process. This is the amount
 // of time that passed since boot multiplied by the number of CPUs, from which
 // we subtract the time spent in the idle threads.
@@ -866,6 +970,8 @@ osv::clock::uptime::duration process_cputime()
     return ret;
 }
 
+/* 累加所有线程的CPU时间
+ */
 std::chrono::nanoseconds osv_run_stats()
 {
     thread_runtime::duration total_app_time;
@@ -900,6 +1006,8 @@ thread *thread::find_by_id(unsigned int id)
     return (*th).second;
 }
 
+/* 访问此线程的_tcb对应区域
+ */
 void* thread::do_remote_thread_local_var(void* var)
 {
     auto tls_cur = static_cast<char*>(current()->_tcb->tls_base);
@@ -931,6 +1039,8 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
             _app_runtime = app->runtime();
         }
     }
+    /* 准备TLS
+     */
     setup_tcb();
     // module 0 is always the core:
     assert(_tls.size() == elf::program::core_module_index);
@@ -946,6 +1056,8 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
         }
     }
 
+    /* 分配tid
+     */
     WITH_LOCK(thread_map_mutex) {
         if (!main) {
             auto ttid = _s_idgen;
@@ -974,6 +1086,8 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
     if (!main && sched::s_current) {
         remote_thread_local_var(s_current) = this;
     }
+    /* 设置栈及相关寄存器位置
+     */
     init_stack();
 
     if (_attr._detached) {
@@ -985,6 +1099,8 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
         _pinned = true;
     }
 
+    /* 指定了main,直接设置running状态
+     */
     if (main) {
         _detached_state->_cpu = attr._pinned_cpu;
         _detached_state->st.store(status::running);
@@ -1061,6 +1177,8 @@ thread::~thread()
     rcu_dispose(_detached_state.release());
 }
 
+/* 设置相关属性后唤醒
+ */
 void thread::start()
 {
     assert(_detached_state->st == status::unstarted);
@@ -1086,6 +1204,8 @@ void thread::prepare_wait()
     _detached_state->st.store(status::waiting);
 }
 
+/* 唤醒joiner
+ */
 // This function is responsible for changing a thread's state from
 // "terminating" to "terminated", while also waking a thread sleeping on
 // join(), if any.
@@ -1121,6 +1241,8 @@ void thread::destroy()
     }
 }
 
+/* 将指定线程加入当前CPU的incoming_wakeups中
+ */
 // Must be called under rcu_read_lock
 //
 // allowed_initial_states_mask *must* contain status::waiting, and
@@ -1157,6 +1279,8 @@ void thread::wake_impl(detached_state* st, unsigned allowed_initial_states_mask)
     }
 }
 
+/* 将当前线程加入当前CPU的incoming_wakeups中
+ */
 void thread::wake()
 {
     WITH_LOCK(rcu_read_lock) {
@@ -1164,6 +1288,8 @@ void thread::wake()
     }
 }
 
+/* ???
+ */
 void thread::wake_lock(mutex* mtx, wait_record* wr)
 {
     // must be called with mtx held
@@ -1172,6 +1298,8 @@ void thread::wake_lock(mutex* mtx, wait_record* wr)
         // We want to send_lock() to this thread, but we want to be sure we're the only
         // ones doing it, and that it doesn't wake up while we do
         auto expected = status::waiting;
+        /* 尝试从waiting状态变为sending_lock
+         */
         if (!st->st.compare_exchange_strong(expected, status::sending_lock, std::memory_order_relaxed)) {
             // make sure the thread can see wr->woken() == true.  We're still protected by
             // the mutex, so so need for extra protection
@@ -1191,6 +1319,8 @@ void thread::wake_lock(mutex* mtx, wait_record* wr)
     }
 }
 
+/* 尝试直接waiting状态改为terminated
+ */
 bool thread::unsafe_stop()
 {
     WITH_LOCK(rcu_read_lock) {
@@ -1208,6 +1338,8 @@ void thread::main()
     _func();
 }
 
+/* 触发当前CPU重新调度
+ */
 void thread::wait()
 {
     trace_sched_wait();
@@ -1215,6 +1347,8 @@ void thread::wait()
     trace_sched_wait_ret();
 }
 
+/* 尝试改变waiting状态,触发当前CPU重新调度
+ */
 void thread::stop_wait()
 {
     // Can only re-enable preemption of this thread after it is no longer
@@ -1237,6 +1371,9 @@ void thread::stop_wait()
     assert(st.load() == status::running);
 }
 
+/* 执行exit_notifiers回调,设置状态为terminating
+   最后循环触发当前CPU重新调度(此线程不会再执行实际工作)
+ */
 void thread::complete()
 {
     run_exit_notifiers();
@@ -1276,6 +1413,8 @@ void thread::exit()
     t->complete();
 }
 
+/* 通过timer_list::suspend从当前CPU的timers移除_active_timers
+ */
 void timer_base::client::suspend_timers()
 {
     if (_timers_need_reload) {
@@ -1285,6 +1424,9 @@ void timer_base::client::suspend_timers()
     cpu::current()->timers.suspend(_active_timers);
 }
 
+/* 通过timer_list::resume向当前CPU的timers加入_active_timers,
+   加入成功则触发timer_list::rearm
+ */
 void timer_base::client::resume_timers()
 {
     if (!_timers_need_reload) {
@@ -1294,6 +1436,8 @@ void timer_base::client::resume_timers()
     cpu::current()->timers.resume(_active_timers);
 }
 
+/* 将当前线程设置为_joiner以等待此线程变为terminated时被唤醒
+ */
 void thread::join()
 {
     auto& st = _detached_state->st;
@@ -1311,6 +1455,8 @@ void thread::join()
     wait_until([&] { return st.load() == status::terminated; });
 }
 
+/* 尝试从attached状态变为detached
+ */
 void thread::detach()
 {
     _attr._detached = true;
@@ -1370,6 +1516,8 @@ void thread::sleep_impl(timer &t)
     wait_until([&] { return t.expired(); });
 }
 
+/* 唤醒线程(加入到当前CPU的incoming_wakeups)
+ */
 void thread_handle::wake()
 {
     WITH_LOCK(rcu_read_lock) {
@@ -1385,6 +1533,9 @@ timer_list::callback_dispatch::callback_dispatch()
     clock_event->set_callback(this);
 }
 
+/* 触发已过期的timers的expire
+   尝试重新设置clock_event的触发时间
+ */
 void timer_list::fired()
 {
     auto now = osv::clock::uptime::now();
@@ -1411,6 +1562,8 @@ void timer_list::fired()
     }
 }
 
+/* 尝试为clock_event设置更早的触发时间
+ */
 void timer_list::rearm()
 {
     auto t = _list.get_next_timeout();
@@ -1420,6 +1573,8 @@ void timer_list::rearm()
     }
 }
 
+/* 从_list移除timers中所有timer_bases
+ */
 // call with irq disabled
 void timer_list::suspend(timer_base::client_list_t& timers)
 {
@@ -1429,6 +1584,9 @@ void timer_list::suspend(timer_base::client_list_t& timers)
     }
 }
 
+/* 尝试向_list加入timers中timer_bases
+   至少加入一个,则触发rearm
+ */
 // call with irq disabled
 void timer_list::resume(timer_base::client_list_t& timers)
 {
@@ -1459,6 +1617,10 @@ timer_base::~timer_base()
     cancel();
 }
 
+/* 从绑定的client的_active_timers中移除,并执行client的timer_fired
+       client = cpu    - [Do nothing]
+       client = thread - 执行wake唤醒此线程
+ */
 void timer_base::expire()
 {
     trace_timer_fired(this);
@@ -1467,6 +1629,9 @@ void timer_base::expire()
     _t.timer_fired();
 }
 
+/* 向绑定的client的_active_timers中加入,
+   并尝试向当前CPU的timers中加入,触发rearm
+ */
 void timer_base::set(osv::clock::uptime::time_point time)
 {
     trace_timer_set(this, time.time_since_epoch().count());
@@ -1483,6 +1648,8 @@ void timer_base::set(osv::clock::uptime::time_point time)
     }
 };
 
+/* 尝试从绑定的client的_active_timers和当前CPU的timers中移除
+ */
 void timer_base::cancel()
 {
     if (_state == state::free) {
@@ -1501,6 +1668,9 @@ void timer_base::cancel()
     // reprogramming the timer
 }
 
+/* 从当前CPU的timers中移除旧值或向绑定的client的_active_timers中加入新值
+   尝试向当前CPU的timers中加入新值,触发rearm
+ */
 void timer_base::reset(osv::clock::uptime::time_point time)
 {
     trace_timer_reset(this, time.time_since_epoch().count());
@@ -1546,6 +1716,8 @@ thread::reaper::reaper()
     _thread->start();
 }
 
+/* 等待_zombies非空,遍历_zombies中每个thread,调用join和_cleanup
+ */
 void thread::reaper::reap()
 {
     while (true) {
@@ -1561,6 +1733,8 @@ void thread::reaper::reap()
     }
 }
 
+/* 向_zombies加入thread,唤醒_thread
+ */
 void thread::reaper::add_zombie(thread* z)
 {
     assert(z->_attr._detached);
@@ -1577,6 +1751,8 @@ void init_detached_threads_reaper()
     thread::_s_reaper = new thread::reaper;
 }
 
+/* 执行一次schedule,然后启动thread_map中的线程
+ */
 void start_early_threads()
 {
     // We're called from the idle thread, which must not sleep, hence this
@@ -1599,6 +1775,8 @@ void start_early_threads()
     }
 }
 
+/* 使用cont创建一个特殊的thread,不执行start而是switch_to_first
+ */
 void init(std::function<void ()> cont)
 {
     thread::attr attr;
@@ -1608,6 +1786,8 @@ void init(std::function<void ()> cont)
     t.switch_to_first();
 }
 
+/* 设置kernel TLS
+ */
 void init_tls(elf::tls_data tls_data)
 {
     tls = tls_data;
@@ -1622,6 +1802,8 @@ size_t kernel_tls_size()
 // implementation, please refer to:
 // https://docs.google.com/document/d/1W7KCxOxP-1Fy5EyF2lbJGE2WuKmu5v0suYqoHas1jRM
 
+/* 将局部运行时间转换为全局运行时间
+ */
 void thread_runtime::export_runtime()
 {
     if (_renormalize_count != -1) {
@@ -1630,6 +1812,10 @@ void thread_runtime::export_runtime()
     }
 }
 
+/* 调整睡眠结束线程的运行时间
+       发生迁移而睡眠  - 全局运行时间转换为局部运行时间
+       本地睡眠未标准化 - 进行一次标准化或直接置为0 
+ */
 void thread_runtime::update_after_sleep()
 {
     auto cpu_renormalize_count = cpu::current()->renormalize_count;
@@ -1652,6 +1838,8 @@ void thread_runtime::update_after_sleep()
     _renormalize_count = cpu_renormalize_count;
 }
 
+/* (假定)线程以当前优先级运行了time时间,更新其运行时间
+ */
 void thread_runtime::ran_for(thread_runtime::duration time)
 {
     assert (_priority > 0);
@@ -1715,6 +1903,8 @@ const auto hysteresis_mul_exp_tau = exp_tau(thyst);
 const auto hysteresis_div_exp_tau = exp_tau(-thyst);
 const auto penalty_exp_tau = exp_tau(context_switch_penalty);
 
+/* 线程被调度前先增加ran_for(-thyst)运行时间,避免立即被抢占
+ */
 void thread_runtime::hysteresis_run_start()
 {
     // Optimized version of ran_for(-thyst);
@@ -1734,6 +1924,8 @@ void thread_runtime::hysteresis_run_start()
     }
 }
 
+/* 线程被调度后增加ran_for(thyst)运行时间,恢复正常运行时间
+ */
 void thread_runtime::hysteresis_run_stop()
 {
     // Optimized version of ran_for(thyst);
@@ -1746,6 +1938,8 @@ void thread_runtime::hysteresis_run_stop()
     _Rtt += _priority * (cnew - cold);
 }
 
+/* 增加表示线程切换惩罚的运行时间,避免频繁切换
+ */
 void thread_runtime::add_context_switch_penalty()
 {
     // Does the same as: ran_for(context_switch_penalty);
@@ -1756,6 +1950,9 @@ void thread_runtime::add_context_switch_penalty()
 
 }
 
+/* 计算达到target_local_time前实际可运行时间
+   用于线程调度时计算实际运行时间
+ */
 thread_runtime::duration
 thread_runtime::time_until(runtime_t target_local_runtime) const
 {
@@ -1772,6 +1969,8 @@ thread_runtime::time_until(runtime_t target_local_runtime) const
     return thread_runtime::duration((thread_runtime::duration::rep) ret);
 }
 
+/* 遍历thread_map线程,执行f
+ */
 void with_all_threads(std::function<void(thread &)> f) {
     WITH_LOCK(thread_map_mutex) {
         for (auto th : thread_map) {
@@ -1780,6 +1979,8 @@ void with_all_threads(std::function<void(thread &)> f) {
     }
 }
 
+/* 寻找thread_map指定线程,执行f
+ */
 void with_thread_by_id(unsigned id, std::function<void(thread *)> f) {
     WITH_LOCK(thread_map_mutex) {
         f(thread::find_by_id(id));

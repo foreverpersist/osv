@@ -87,6 +87,9 @@ public:
     static const size_t min_object_size;
 };
 
+/* 每个page_range的地址是从phys_mem开始的真实物理地址
+   即page_range有两个属性: &page_range(自身地址), size
+ */
 struct page_range {
     explicit page_range(size_t size);
     bool operator<(const page_range& pr) const {
@@ -187,6 +190,8 @@ namespace stats {
     void on_jvm_heap_free(size_t mem);
 }
 
+/* 通过mmu::virt_to_phys获得物理地址
+ */
 class phys_contiguous_memory final {
 public:
     phys_contiguous_memory(size_t size, size_t align) {
@@ -212,6 +217,8 @@ private:
     size_t _size;
 };
 
+/* 在unique_ptr失效时被调用,从而释放线程地址空间
+ */
 struct phys_deleter {
     void operator()(void* p) { free_phys_contiguous_aligned(p); }
 };
@@ -219,6 +226,8 @@ struct phys_deleter {
 template <typename T>
 using phys_ptr = std::unique_ptr<T, memory::phys_deleter>;
 
+/* 通过alloc_phys_contiguous_aligned分配内存,并进行对象初始化
+ */
 template <typename T, size_t align, typename... Args>
 inline
 phys_ptr<T> make_phys_ptr(Args&&... args)
@@ -235,6 +244,8 @@ phys_ptr<T> make_phys_ptr(Args&&... args)
     return phys_ptr<T>(static_cast<T*>(ptr));
 }
 
+/* 同上,只是初始化的是数组
+ */
 template <typename T>
 inline
 phys_ptr<T[]> make_phys_array(size_t n, size_t align)
@@ -253,6 +264,8 @@ phys_ptr<T[]> make_phys_array(size_t n, size_t align)
     return phys_ptr<T[]>(static_cast<T*>(ptr));
 }
 
+/* 返回线性地址相对于phys_mem的偏移
+ */
 template <typename T>
 inline
 mmu::phys
@@ -264,6 +277,8 @@ virt_to_phys(const phys_ptr<T>& p)
 
 extern __thread unsigned emergency_alloc_level;
 
+/* 就两个static方法,没有任何属性,有必要声明为class?
+ */
 class reclaimer_lock_type {
 public:
     static void lock() { ++emergency_alloc_level; }

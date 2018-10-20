@@ -83,6 +83,9 @@ enum {
     ELFOSABI_STANDALONE = 255, // Standalone (embedded) application
 };
 
+/* ELF Header
+   一个ELF Header对应一个ELF文件
+ */
 struct Elf64_Ehdr {
     unsigned char e_ident[16]; /* ELF identification */
     Elf64_Half e_type; /* Object file type */
@@ -127,7 +130,10 @@ enum {
     NT_VERSION = 1,
 };
 
-
+/* Program Header
+   一个Program Header描述一个Segment或系统准备程序执行需要的信息
+   一个Segment包含一到多个Section
+ */
 struct Elf64_Phdr {
     Elf64_Word p_type; /* Type of segment */
     Elf64_Word p_flags; /* Segment attributes */
@@ -139,6 +145,8 @@ struct Elf64_Phdr {
     Elf64_Xword p_align; /* Alignment of segment */
 };
 
+/* 注释
+ */
 class Elf64_Note {
 public:
     explicit Elf64_Note(void *base, char *str);
@@ -211,6 +219,8 @@ enum {
     STN_UNDEF = 0,
 };
 
+/* 动态连接信息
+ */
 struct Elf64_Dyn {
     Elf64_Sxword d_tag;
     union {
@@ -219,6 +229,8 @@ struct Elf64_Dyn {
     } d_un;
 };
 
+/* 可重定位信息
+ */
 struct Elf64_Rela {
     Elf64_Addr r_offset; /* Address of reference */
     Elf64_Xword r_info; /* Symbol index and type of relocation */
@@ -286,6 +298,8 @@ enum {
     AT_EXECFN = 31,
 };
 
+/* 符号信息
+ */
 struct Elf64_Sym {
     Elf64_Word st_name; /* Symbol name */
     unsigned char st_info; /* Type and Binding attributes */
@@ -298,12 +312,17 @@ struct Elf64_Sym {
 class program;
 struct symbol_module;
 
+/* Thread Local Stack
+   线程局部栈
+ */
 struct tls_data {
     void* start;
     size_t filesize;
     size_t size;
 };
 
+/* 符号地址
+ */
 struct dladdr_info {
     dladdr_info() : fname{}, base{}, sym{}, addr{} {}
     const char* fname;
@@ -312,6 +331,9 @@ struct dladdr_info {
     void* addr;
 };
 
+/* Section Header
+   Section包含链接和重定位的重要数据
+ */
 struct [[gnu::packed]] Elf64_Shdr {
     Elf64_Word sh_name; /* Section name */
     Elf64_Word sh_type; /* Section type */

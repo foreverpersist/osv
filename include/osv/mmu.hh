@@ -30,12 +30,16 @@ typedef std::shared_ptr<balloon> balloon_ptr;
  */
 namespace mmu {
 
+/* 返回线性地址相对于phys_mem的偏移
+ */
 // when we know it was dynamically allocated
 inline phys virt_to_phys_dynamic_phys(void* virt)
 {
     return static_cast<char*>(virt) - phys_mem;
 }
 
+/* 返回线性地址在level级页表中的索引位置(level越小,越偏向低地址)
+ */
 constexpr inline unsigned pt_index(void *virt, unsigned level)
 {
     return (reinterpret_cast<ulong>(virt) >> (page_size_shift + level * pte_per_page_shift)) & (pte_per_page - 1);
