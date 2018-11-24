@@ -828,6 +828,7 @@ drivers += drivers/vmxnet3-queues.o
 drivers += drivers/virtio-blk.o
 drivers += drivers/virtio-scsi.o
 drivers += drivers/virtio-rng.o
+drivers += drivers/virtio-9p.o
 drivers += drivers/kvmclock.o drivers/xenclock.o drivers/hypervclock.o
 drivers += drivers/acpi.o
 drivers += drivers/hpet.o
@@ -941,6 +942,7 @@ objects += core/app.o
 objects += core/libaio.o
 objects += core/osv_execve.o
 objects += core/osv_c_wrappers.o
+objects += core/p9client.o
 
 #include $(src)/libc/build.mk:
 libc =
@@ -1786,6 +1788,11 @@ fs_objs += rofs/rofs_vfsops.o \
 	rofs/rofs_common.o
 
 fs_objs += procfs/procfs_vnops.o
+
+# Append 9pfs
+fs_objs += 9p/v9fs.o \
+	9p/v9fs_vfsops.o \
+	9p/v9fs_vnops.o \
 
 objects += $(addprefix fs/, $(fs_objs))
 objects += $(addprefix libc/, $(libc))
