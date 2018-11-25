@@ -301,10 +301,14 @@ struct p9_fid *v9fs_session_init(struct v9fs_session_info *v9ses,
 
 	/* 创建一个客户端,并未进行连接
 	 */
-	v9ses->clnt = new p9_client(dev_name, data);
-	if (!v9ses->clnt) {
+	try
+	{
+		v9ses->clnt = new p9_client(dev_name, data);
+	}
+	catch (std::runtime_error& err)
+	{
 		// rc = ;
-		debugf("problem initializing 9p client\n");
+		debugf("problem initializing 9p client: %s\n", err.what());
 		goto err_names;
 	}
 

@@ -127,6 +127,10 @@ vt9p::~vt9p()
             break;
         }
     }
+    if (_config.tag)
+    {
+        free(_config.tag);
+    }
 }
 
 /* Read 9P Config
@@ -136,6 +140,9 @@ void vt9p::read_config()
 {
     //read all of the block config (including size, mce, topology,..) in one shot
     virtio_conf_read(virtio_pci_config_offset(), &_config, sizeof(_config));
+    _config.tag = (char *) malloc(_config.tag_len);
+    virtio_conf_read(virtio_pci_config_offset() + sizeof(_config.tag_len), 
+        _config.tag, _config.tag_len);
 
     trace_virtio_9p_read_config_tag_len(_config.tag_len);
 
@@ -186,7 +193,7 @@ int vt9p::make_request(struct p9_req_t *req)
         queue->init_sg();
         if (req->tc->size)
             queue->add_out_sg(req->tc->sdata, req->tc->size);
-        if (req->rc->size)
+        if (req->rc->capacity)
             queue->add_in_sg(req->rc->sdata, req->rc->capacity);
 
         queue->add_buf_wait(req);
@@ -213,7 +220,7 @@ hw_driver* vt9p::probe(hw_device* dev)
 
 int vt9p::bind_client(struct p9_client *client, const char *devname, char *args)
 {
-    int ret = 0;
+    int ret = -EBUSY;
     WITH_LOCK(_drivers_lock)
     {
         for (auto it = _vt9p_drivers.begin(); it != _vt9p_drivers.end(); it++)
@@ -225,9 +232,9 @@ int vt9p::bind_client(struct p9_client *client, const char *devname, char *args)
                 {
                     (*it)->_client = client;
                     client->p9_client_connect((*it));
+                    ret = 0;
                     break;
                 }
-                ret = -EBUSY;
             }
         }
     }

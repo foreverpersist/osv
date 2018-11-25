@@ -84,7 +84,7 @@ public:
 
     struct vt9p_config {
             uint16_t tag_len;
-            char tag[0];
+            char *tag;
     } __attribute__((packed));
 
 

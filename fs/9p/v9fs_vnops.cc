@@ -1016,6 +1016,9 @@ static int v9fs_setattr(struct vnode *vp, struct vattr *attr)
 static int v9fs_inactive(vnode *vp)
 {
     struct v9fs_inode *inode = (struct v9fs_inode *) vp->v_data;
+
+    if (!inode)
+        return -1;
     
     p9_client::p9_client_clunk(inode->fid);
     if (inode->handle_fid)
