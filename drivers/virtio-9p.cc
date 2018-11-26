@@ -164,7 +164,6 @@ void vt9p::req_done()
 
         u32 len;
         if((req = static_cast<struct p9_req_t *>(queue->get_buf_elem(&len))) != nullptr) {
-            queue->wakeup_waiter();
             if (len)
                 p9_client::p9_client_cb(req, REQ_STATUS_RCVD);
             queue->get_buf_finalize();

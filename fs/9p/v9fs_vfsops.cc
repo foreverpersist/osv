@@ -161,8 +161,8 @@ static int v9fs_mount(struct mount *mp, const char *dev, int flags, const void *
     }
     vp->v_mount = mp;
     root = (struct v9fs_inode *) malloc(sizeof(v9fs_inode));
+    memset(root, 0, sizeof(v9fs_inode));
     root->fid = fid;
-    root->handle_fid = nullptr;
     vp->v_data = root;
 
     sb->s_root = mp->m_root;

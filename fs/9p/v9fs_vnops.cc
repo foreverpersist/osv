@@ -99,7 +99,7 @@ static int v9fs_open(struct file *fp)
     {
         omode = v9fs_flags2omode(fp->f_flags, inode->fid->clnt->p9_is_proto_dotu());
     }
-    inode->handle_fid = p9_client::p9_client_walk(inode->fid, 0, nullptr, 0);
+    inode->handle_fid = p9_client::p9_client_walk(inode->fid, 0, nullptr, 1);
     if (!(inode->handle_fid))
     {
         return -1;
@@ -185,7 +185,7 @@ static int v9fs_read_without_cache(struct vnode *vp, struct file *fp, struct uio
     ret = p9_client::p9_client_read(fid, uio, len, &err);
     if (!ret)
     {
-        debugf("V9FS: p9_client_read_uio failed %d\n", err);
+        debugf("V9FS: p9_client_read failed %d\n", err);
     }
 
     return err;
@@ -235,7 +235,7 @@ static int v9fs_write(struct vnode *vp, struct uio *uio, int ioflag)
     ret = p9_client::p9_client_write(fid, uio, uio->uio_resid, &err);
     if (!ret)
     {
-        debugf("V9FS: p9_client_read_uio failed %d\n", err);
+        debugf("V9FS: p9_client_read failed %d\n", err);
         return err;
     }
 
@@ -321,7 +321,7 @@ static int load_dir_entries(struct v9fs_inode *inode)
     struct uio uio;
     struct iovec iov;
     int n;
-    struct p9_fid *fid = inode->fid;
+    struct p9_fid *fid = inode->handle_fid;
     struct p9_rdir *rdir;
     struct v9fs_dirent *entry;
 
@@ -329,6 +329,7 @@ static int load_dir_entries(struct v9fs_inode *inode)
      */
     buflen = fid->clnt->p9_msize() - P9_READDIRHDRSZ;
     rdir = (struct p9_rdir *) malloc(sizeof(struct p9_rdir));
+    memset(rdir, 0, sizeof(struct p9_rdir));
 
     while (1)
     {
@@ -389,7 +390,7 @@ static int load_dir_entries_dotl(struct v9fs_inode *inode)
     loff_t pos = 0;
     int err;
     int buflen;
-    struct p9_fid *fid = inode->fid;
+    struct p9_fid *fid = inode->handle_fid;
     struct p9_rdir *rdir;
     struct p9_dirent curdirent;
     struct v9fs_dirent *entry;
@@ -398,6 +399,7 @@ static int load_dir_entries_dotl(struct v9fs_inode *inode)
      */
     buflen = fid->clnt->p9_msize() - P9_READDIRHDRSZ;
     rdir = (struct p9_rdir *) malloc(sizeof(struct p9_rdir));
+    memset(rdir, 0, sizeof(struct p9_rdir));
 
     while (1)
     {
@@ -425,6 +427,9 @@ static int load_dir_entries_dotl(struct v9fs_inode *inode)
 
             /* 解析到一个目录项
              */
+            debugf("V9FS: read a dirent, qid(tvp)[%d, %d, %d] off %d type %d name %s\n", 
+                curdirent.qid.type, curdirent.qid.version, curdirent.qid.path, 
+                curdirent.d_off, curdirent.d_type, curdirent.d_name);
             entry = (struct v9fs_dirent *) malloc(sizeof(struct v9fs_dirent));
             entry->dirent = curdirent;
             entry->next = inode->entries;
@@ -444,6 +449,7 @@ static int v9fs_readdir(struct vnode *vp, struct file *fp, struct dirent *dir)
 {
     int err;
     struct v9fs_inode *inode = (struct v9fs_inode *) vp->v_data;
+
 
     if (!inode->entries)
     {
@@ -604,7 +610,7 @@ static int v9fs_create(struct vnode *dvp, char *name, mode_t mode)
 
     /* 复制一份父目录的fid,用于创建文件
      */
-    fid = p9_client::p9_client_walk(dfid, 0, nullptr, 0);
+    fid = p9_client::p9_client_walk(dfid, 0, nullptr, 1);
     if (!fid)
     {
         err = -1;
@@ -716,14 +722,14 @@ static int v9fs_rename(struct vnode *dvp1, struct vnode *vp1, char *name1,
     }
 
     olddirfid = p9_client::p9_client_walk(((struct v9fs_inode *) dvp1->v_data)->fid, 
-        0, nullptr, 0);
+        0, nullptr, 1);
     if (!olddirfid)
     {
         return -1;
     }
 
     newdirfid = p9_client::p9_client_walk(((struct v9fs_inode *) dvp2->v_data)->fid, 
-        0, nullptr, 0);
+        0, nullptr, 1);
     if (!newdirfid)
     {
         err = -1;
@@ -783,7 +789,7 @@ static int v9fs_mkdir(struct vnode *dvp, char *name, mode_t mode)
 
     /* 复制一份父目录的fid,用于创建目录
      */
-    fid = p9_client::p9_client_walk(dfid, 0, nullptr, 0);
+    fid = p9_client::p9_client_walk(dfid, 0, nullptr, 1);
     if (!fid)
     {
         err = -1;
@@ -795,13 +801,13 @@ static int v9fs_mkdir(struct vnode *dvp, char *name, mode_t mode)
     {
         /* 2000.L使用p9_client_mkdir_dotl
          */
-        err = p9_client::p9_client_mkdir_dotl(dfid, name, mode, {(unsigned) ~0}, &qid);
+        err = p9_client::p9_client_mkdir_dotl(fid, name, mode, {(unsigned) ~0}, &qid);
     }
     else
     {
         /* 2000, 2000.u使用p9_client_fcreate
          */
-        err = p9_client::p9_client_fcreate(dfid, name, mode & ~0, P9_OREAD, nullptr);
+        err = p9_client::p9_client_fcreate(fid, name, mode & ~0, P9_OREAD, nullptr);
     }
 
     /* 通知目录
@@ -855,7 +861,7 @@ static int v9fs_getattr(struct vnode *vp, struct vattr *attr)
         /* 2000.L使用p9_client_getattr_dotl, p9_client_statfs
          */
         struct p9_stat_dotl *st;
-        struct p9_rstatfs rs;
+        // struct p9_rstatfs rs;
         st = p9_client::p9_client_getattr_dotl(fid, P9_STATS_ALL);
         if (!st)
             return -1;
@@ -869,10 +875,10 @@ static int v9fs_getattr(struct vnode *vp, struct vattr *attr)
         attr->va_uid     = st->st_uid.val;
         attr->va_gid     = st->st_gid.val;
         
-        if (!p9_client::p9_client_statfs(fid, &rs))
-        {
-            attr->va_fsid = rs.fsid;
-        }
+        // if (!p9_client::p9_client_statfs(fid, &rs))
+        // {
+        //     attr->va_fsid = rs.fsid;
+        // }
         attr->va_nodeid  = v9fs_qid2ino(&st->qid);
         attr->va_atime   = to_timespec(st->st_atime_sec, st->st_atime_nsec);
         attr->va_mtime   = to_timespec(st->st_mtime_sec, st->st_mtime_nsec);
@@ -1096,7 +1102,7 @@ static int v9fs_link(struct vnode *ndvp, struct vnode *vp, char *name)
          */
         /* 复制一份父目录的fid,用于创建硬连接
          */
-        odfid = p9_client::p9_client_walk(dfid, 0, nullptr, 0);
+        odfid = p9_client::p9_client_walk(dfid, 0, nullptr, 1);
         if (!odfid)
         {
             err = -1;
@@ -1231,7 +1237,7 @@ static int v9fs_symlink(struct vnode *dvp, char *name, char *oldpath)
          */
         /* 复制一份父目录的fid,用于创建软连接
          */
-        odfid = p9_client::p9_client_walk(dfid, 0, nullptr, 0);
+        odfid = p9_client::p9_client_walk(dfid, 0, nullptr, 1);
         if (!odfid)
         {
             err = -1;
