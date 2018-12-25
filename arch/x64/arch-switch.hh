@@ -72,7 +72,14 @@ void (*resolve_set_fsbase(void))(u64 v)
     }
 }
 
-void set_fsbase(u64 v) __attribute__((ifunc("resolve_set_fsbase")));
+void set_fsbase(u64 v)// __attribute__((ifunc("resolve_set_fsbase")));
+{
+    if (processor::features().fsgsbase) {
+        return set_fsbase_fsgsbase(v);
+    } else {
+        return set_fsbase_msr(v);
+    }
+}
 
 void thread::switch_to()
 {
@@ -90,7 +97,8 @@ void thread::switch_to()
     auto mxcsr = processor::stmxcsr();
     asm volatile
         ("mov %%rbp, %c[rbp](%0) \n\t"
-         "movq $1f, %c[rip](%0) \n\t"
+         "leaq 1f(%%rip), %%rbx \n\t"
+         "movq %%rbx, %c[rip](%0) \n\t"
          "mov %%rsp, %c[rsp](%0) \n\t"
          "mov %c[rsp](%1), %%rsp \n\t"
          "mov %c[rbp](%1), %%rbp \n\t"

@@ -19,11 +19,11 @@ inline void tracepointv<_id, std::tuple<s_args...>(r_args...), assign>::operator
             "1: .byte 0x0f, 0x1f, 0x44, 0x00, 0x00 \n\t"  // 5-byte nop
             ".pushsection .tracepoint_patch_sites, \"aw\", @progbits \n\t"
             ".quad %c[id] \n\t"
-            ".quad %c[type] \n\t"
+            ".quad %[type] \n\t"
             ".quad 1b \n\t"
             ".quad %l[slow_path] \n\t"
             ".popsection"
-            : : [type]"i"(&typeid(*this)), [id]"i"(_id) : : slow_path);
+            : : [type]"r"(&typeid(*this)), [id]"i"(_id) : "memory" : slow_path);
     return;
 slow_path:
     // We don't want register shuffling and function calls here, so pretend

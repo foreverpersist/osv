@@ -358,14 +358,17 @@ makedir = $(call very-quiet, mkdir -p $(dir $@))
 build-so = $(CC) $(CFLAGS) -o $@ $^ $(EXTRA_LIBS)
 q-build-so = $(call quiet, $(build-so), LINK $@)
 
-
-$(out)/%.o: %.cc | generated-headers
+$(out)/tools/%.o: tools/%.cc | generated-headers
 	$(makedir)
 	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX $*.cc)
 
+$(out)/%.o: %.cc | generated-headers
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -mcmodel=large -c -o $@ $<, CXX $*.cc large)
+
 $(out)/%.o: %.c | generated-headers
 	$(makedir)
-	$(call quiet, $(CC) $(CFLAGS) -c -o $@ $<, CC $*.c)
+	$(call quiet, $(CC) $(CFLAGS) -mcmodel=large -c -o $@ $<, CC $*.c large)
 
 $(out)/%.o: %.S
 	$(makedir)
@@ -1852,6 +1855,9 @@ endif
 boost-libs := $(boost-lib-dir)/libboost_program_options$(boost-mt).a \
               $(boost-lib-dir)/libboost_system$(boost-mt).a
 
+boost-libs.so := $(boost-lib-dir)/libboost_program_options$(boost-mt).so \
+              $(boost-lib-dir)/libboost_system$(boost-mt).so
+
 ifeq ($(nfs), true)
 	nfs-lib = $(out)/libnfs.a
 	nfs_o = nfs.o nfs_vfsops.o nfs_vnops.o
@@ -1872,13 +1878,15 @@ stage1_targets = $(out)/arch/$(arch)/boot.o $(out)/loader.o $(out)/runtime.o $(d
 stage1: $(stage1_targets) links
 .PHONY: stage1
 
+libc.so = /lib/x86_64-linux-gnu/libc.so.6
+
 $(out)/loader.elf: $(stage1_targets) arch/$(arch)/loader.ld $(out)/bootfs.o
 	$(call quiet, $(LD) -o $@ --defsym=OSV_KERNEL_BASE=$(kernel_base) \
-		-Bdynamic --export-dynamic --eh-frame-hdr --enable-new-dtags \
+		-Bdynamic --eh-frame-hdr --enable-new-dtags \
 	    $(^:%.ld=-T %.ld) \
 	    --whole-archive \
 	      $(libstdc++.a) $(libgcc.a) $(libgcc_eh.a) \
-	      $(boost-libs) \
+	      $(boost-libs.so) $(libc.so) \
 	    --no-whole-archive, \
 		LINK loader.elf)
 	@# Build libosv.so matching this loader.elf. This is not a separate

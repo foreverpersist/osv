@@ -105,10 +105,31 @@ void (*resolve_fpu_state_restore())(processor::fpu_state *s) {
 }
 
 void fpu_state_init(processor::fpu_state *s)
-    __attribute__((ifunc("resolve_fpu_state_init")));
+{
+    if (processor::features().xsave) {
+        return fpu_state_init_xsave(s);
+    } else {
+        return fpu_state_init_fxsave(s);
+    }
+}
+//    __attribute__((ifunc("resolve_fpu_state_init")));
 void fpu_state_save(processor::fpu_state *s)
-    __attribute__((ifunc("resolve_fpu_state_save")));
+{
+    if (processor::features().xsave) {
+        return fpu_state_save_xsave(s);
+    } else {
+        return fpu_state_save_fxsave(s);
+    }
+}
+//    __attribute__((ifunc("resolve_fpu_state_save")));
 void fpu_state_restore(processor::fpu_state *s)
-    __attribute__((ifunc("resolve_fpu_state_restore")));
+{
+    if (processor::features().xsave) {
+        return fpu_state_restore_xsave(s);
+    } else {
+        return fpu_state_restore_fxsave(s);
+    }
+}
+//    __attribute__((ifunc("resolve_fpu_state_restore")));
 
 }

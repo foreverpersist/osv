@@ -120,7 +120,10 @@ extern boot_time_chart boot_time;
 void arch_setup_free_memory()
 {
     static ulong edata;
-    asm ("movl $.edata, %0" : "=rm"(edata));
+    asm ("push %%rax \n\t"
+         "movabs $.edata, %%rax \n\t"
+         "mov %%rax, %0 \n\t"
+         "pop %%rax \n\t" : "=rm"(edata));
     // copy to stack so we don't free it now
     auto omb = *osv_multiboot_info;
     auto mb = omb.mb;

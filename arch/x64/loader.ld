@@ -16,8 +16,12 @@ SECTIONS
 	 * insists on moving stuff around if we do.
 	 */
     . = OSV_KERNEL_BASE + 0x1000;
-    .dynamic : { *(.dynamic) } :dynamic :text
-    .text : {
+    PAGE_OFFSET = 0xffff800000000000;
+    . += PAGE_OFFSET;
+    .dynamic : AT(ADDR(.dynamic) - PAGE_OFFSET)
+    { *(.dynamic) } :dynamic :text
+    .text : AT(ADDR(.text) - PAGE_OFFSET)
+    {
         text_start = .;
         *(.text.hot .text.hot.*)
         *(.text.unlikely .text.*_unlikely)
@@ -27,58 +31,76 @@ SECTIONS
         text_end = .;
     } :text
     . = ALIGN(8);
-    .fixup : {
+    .fixup : AT(ADDR(.fixup) - PAGE_OFFSET)
+    {
         fault_fixup_start = .;
         *(.fixup)
         fault_fixup_end = .;
     } :text
 
     . = ALIGN(8);
-    .memcpy_decode : {
+    .memcpy_decode : AT(ADDR(.memcpy_decode) - PAGE_OFFSET)
+    {
         memcpy_decode_start = .;
         *(.memcpy_decode)
         memcpy_decode_end = .;
     } :text
 
-    .eh_frame : { *(.eh_frame) } : text
-    .rodata : { *(.rodata*) } :text
-    .eh_frame : { *(.eh_frame) } :text
-    .eh_frame_hdr : { *(.eh_frame_hdr) } :text :eh_frame
-    .note : { *(.note*) } :text :note
-    .gcc_except_table : { *(.gcc_except_table) *(.gcc_except_table.*) } : text
-    .tracepoint_patch_sites ALIGN(8) : {
+    .eh_frame : AT(ADDR(.eh_frame) - PAGE_OFFSET)
+    { *(.eh_frame) } : text
+    .rodata : AT(ADDR(.rodata) - PAGE_OFFSET)
+    { *(.rodata*) } :text
+    .eh_frame : AT(ADDR(.eh_frame) - PAGE_OFFSET)
+    { *(.eh_frame) } :text
+    .eh_frame_hdr : AT(ADDR(.eh_frame_hdr) - PAGE_OFFSET)
+    { *(.eh_frame_hdr) } :text :eh_frame
+    .note : AT(ADDR(.note) - PAGE_OFFSET)
+    { *(.note*) } :text :note
+    .gcc_except_table : AT(ADDR(.gcc_except_table) - PAGE_OFFSET)
+    { *(.gcc_except_table) *(.gcc_except_table.*) } : text
+    .tracepoint_patch_sites ALIGN(8) : 
+    AT(ADDR(.tracepoint_patch_sites) - PAGE_OFFSET)
+    {
         __tracepoint_patch_sites_start = .;
         *(.tracepoint_patch_sites)
         __tracepoint_patch_sites_end = .;
     } : text
-    .data.rel.ro : { *(.data.rel.ro.local* .gnu.linkonce.d.rel.ro.local.*) *(.data.rel.ro .data.rel.ro.* .gnu.linkonce.d.rel.ro.*) } : text
-    .data : { *(.data) } :text
+    .data.rel.ro : AT(ADDR(.data.rel.ro) - PAGE_OFFSET)
+    { *(.data.rel.ro.local* .gnu.linkonce.d.rel.ro.local.*) *(.data.rel.ro .data.rel.ro.* .gnu.linkonce.d.rel.ro.*) } : text
+    .data : AT(ADDR(.data) - PAGE_OFFSET)
+    { *(.data) } :text
     _init_array_start = .;
-    .init_array : {
+    .init_array : AT(ADDR(.init_array) - PAGE_OFFSET)
+    {
         *(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*))
         *(.init_array .ctors)
     } : text
     _init_array_end = .;
     . = ALIGN(4096);
-    .percpu : {
+    .percpu : AT(ADDR(.percpu) - PAGE_OFFSET)
+    {
         _percpu_start = .;
         *(.percpu)
         . = ALIGN(4096);
         _percpu_end = .;
     }
-    .percpu_workers : {
+    .percpu_workers : AT(ADDR(.percpu_workers) - PAGE_OFFSET)
+    {
         _percpu_workers_start = .;
         *(.percpu_workers)
         _percpu_workers_end = .;
     }
     . = ALIGN(64);
-    .tdata : { *(.tdata .tdata.* .gnu.linkonce.td.*) } :tls :text
-    .tbss : {
+    .tdata : AT(ADDR(.tdata) - PAGE_OFFSET)
+    { *(.tdata .tdata.* .gnu.linkonce.td.*) } :tls :text
+    .tbss : AT(ADDR(.tbss) - PAGE_OFFSET)
+    {
         *(.tbss .tbss.* .gnu.linkonce.tb.*)
         . = ALIGN(64);
     } :tls :text
     .tls_template_size = SIZEOF(.tdata) + SIZEOF(.tbss);
-    .bss : { *(.bss .bss.*) } :text
+    .bss : AT(ADDR(.bss) - PAGE_OFFSET)
+    { *(.bss .bss.*) } :text
     . = ALIGN(64);
     tcb0 = .;
     . = . + .tls_template_size + 256;

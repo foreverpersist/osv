@@ -311,7 +311,22 @@ void *(*resolve_memcpy())(void *__restrict dest, const void *__restrict src, siz
 }
 
 void *memcpy(void *__restrict dest, const void *__restrict src, size_t n)
-    __attribute__((ifunc("resolve_memcpy")));
+{
+    if (processor::features().repmovsb) {
+        if (processor::features().ssse3) {
+            return memcpy_repmov_ssse3(dest, src, n);
+        } else {
+            return memcpy_repmov(dest, src, n);
+        }
+    } else {
+        if (processor::features().ssse3) {
+            return memcpy_repmov_old_ssse3(dest, src, n);
+        } else {
+            return memcpy_repmov_old(dest, src, n);
+        }
+    }
+    // __attribute__((ifunc("resolve_memcpy")));
+}
 
 // Since we are using explicit loops, and not the rep instruction
 // (that requires a very specific rcx layout), we can use the same
@@ -517,6 +532,12 @@ void *(*resolve_memset())(void *__restrict dest, int c, size_t n)
 }
 
 void *memset(void *__restrict dest, int c, size_t n)
-    __attribute__((ifunc("resolve_memset")));
+{
+        if (processor::features().repmovsb) {
+        return memset_repstosb(dest, c, n);
+    }
+    return memset_repstos_old(dest, c, n);
+    // __attribute__((ifunc("resolve_memset")));
+}
 
 
