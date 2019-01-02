@@ -1042,7 +1042,7 @@ void create_main_program()
 program::program(void* addr)
     : _next_alloc(addr)
 {
-    _core = std::make_shared<memory_image>(*this, (void*)ELF_IMAGE_START);
+    _core = std::make_shared<memory_image>(*this, (void*)ELF_IMAGE_START + PAGE_OFFSET);
     assert(_core->module_index() == core_module_index);
     _core->load_segments();
     set_search_path({"/", "/usr/lib"});

@@ -21,6 +21,8 @@
 #include <osv/align.hh>
 #include <osv/trace.hh>
 
+#define PAGE_OFFSET 0xffffffffc0000000
+
 struct exception_frame;
 class balloon;
 typedef std::shared_ptr<balloon> balloon_ptr;

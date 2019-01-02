@@ -120,7 +120,8 @@ extern boot_time_chart boot_time;
 void arch_setup_free_memory()
 {
     static ulong edata;
-    asm ("movl $.edata, %0" : "=rm"(edata));
+    asm ("movq $.edata, %0" : "=rm"(edata));
+    edata -= PAGE_OFFSET;
     // copy to stack so we don't free it now
     auto omb = *osv_multiboot_info;
     auto mb = omb.mb;
@@ -184,6 +185,7 @@ void arch_setup_free_memory()
     elf_start = reinterpret_cast<void*>(elf_header);
     elf_size = edata - elf_phys;
     mmu::linear_map(elf_start, elf_phys, elf_size, OSV_KERNEL_BASE);
+    mmu::linear_map(elf_start + PAGE_OFFSET, elf_phys, elf_size, OSV_KERNEL_BASE);
     // get rid of the command line, before low memory is unmapped
     parse_cmdline(mb);
     // now that we have some free memory, we can start mapping the rest

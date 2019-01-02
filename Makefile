@@ -358,14 +358,31 @@ makedir = $(call very-quiet, mkdir -p $(dir $@))
 build-so = $(CC) $(CFLAGS) -o $@ $^ $(EXTRA_LIBS)
 q-build-so = $(call quiet, $(build-so), LINK $@)
 
-
-$(out)/%.o: %.cc | generated-headers
+$(out)/tools/%.o: tools/%.cc | generated-headers
 	$(makedir)
 	$(call quiet, $(CXX) $(CXXFLAGS) -c -o $@ $<, CXX $*.cc)
 
+$(out)/dummy-shlib.o: dummy-shlib.cc | generated-headers
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -mcmodel=large -c -o $@ $<, CXX $*.cc)
+
+$(out)/bsd/%.o: bsd/%.c | generated-headers
+	$(makedir)
+	$(call quiet, $(CC) $(CFLAGS) -mcmodel=kernel -c -o $@ $< \
+		|| $(CC) $(CFLAGS) -mcmodel=large -c -o $@ $<, CC $*.c)
+
+$(out)/bsd/%.o: bsd/%.cc | generated-headers
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -mcmodel=kernel -c -o $@ $< \
+		|| $(CXX) $(CXXFLAGS) -mcmodel=large -c -o $@ $<, CXX $*.cc)
+
+$(out)/%.o: %.cc | generated-headers
+	$(makedir)
+	$(call quiet, $(CXX) $(CXXFLAGS) -mcmodel=kernel -c -o $@ $<, CXX $*.cc)
+
 $(out)/%.o: %.c | generated-headers
 	$(makedir)
-	$(call quiet, $(CC) $(CFLAGS) -c -o $@ $<, CC $*.c)
+	$(call quiet, $(CC) $(CFLAGS) -mcmodel=kernel -c -o $@ $<, CC $*.c)
 
 $(out)/%.o: %.S
 	$(makedir)
@@ -1844,6 +1861,9 @@ endif
 
 boost-libs := $(boost-lib-dir)/libboost_program_options$(boost-mt).a \
               $(boost-lib-dir)/libboost_system$(boost-mt).a
+
+boost-libs = /usr/local/lib/libboost_program_options$(boost-mt).a \
+             /usr/local/lib/libboost_system$(boost-mt).a
 
 ifeq ($(nfs), true)
 	nfs-lib = $(out)/libnfs.a

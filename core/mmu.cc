@@ -96,7 +96,7 @@ void* phys_to_virt(phys pa)
     // The ELF is mapped 1:1
     void* phys_addr = reinterpret_cast<void*>(pa);
     if ((phys_addr >= elf_start) && (phys_addr < elf_start + elf_size)) {
-        return phys_addr;
+        return phys_addr + PAGE_OFFSET;
     }
 
     return phys_mem + pa;
@@ -107,8 +107,8 @@ phys virt_to_phys_pt(void* virt);
 phys virt_to_phys(void *virt)
 {
     // The ELF is mapped 1:1
-    if ((virt >= elf_start) && (virt < elf_start + elf_size)) {
-        return reinterpret_cast<phys>(virt);
+    if ((virt >= elf_start + PAGE_OFFSET) && (virt < elf_start + elf_size + PAGE_OFFSET)) {
+        return reinterpret_cast<phys>(virt - PAGE_OFFSET);
     }
 
 #if CONF_debug_memory
@@ -1254,7 +1254,7 @@ void* map_file(const void* addr, size_t size, unsigned flags, unsigned perm,
 
 bool is_linear_mapped(const void *addr, size_t size)
 {
-    if ((addr >= elf_start) && (addr + size <= elf_start + elf_size)) {
+    if ((addr >= elf_start + PAGE_OFFSET) && (addr + size <= elf_start + elf_size + PAGE_OFFSET)) {
         return true;
     }
     return addr >= phys_mem;

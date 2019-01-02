@@ -310,8 +310,13 @@ void *(*resolve_memcpy())(void *__restrict dest, const void *__restrict src, siz
     }
 }
 
-void *memcpy(void *__restrict dest, const void *__restrict src, size_t n)
+void *memcpy_kernel(void *__restrict dest, const void *__restrict src, size_t n)
     __attribute__((ifunc("resolve_memcpy")));
+
+void *memcpy(void *__restrict dest, const void *__restrict src, size_t n)
+{
+    return memcpy_kernel(dest, src, n);
+}
 
 // Since we are using explicit loops, and not the rep instruction
 // (that requires a very specific rcx layout), we can use the same
@@ -516,7 +521,10 @@ void *(*resolve_memset())(void *__restrict dest, int c, size_t n)
     return memset_repstos_old;
 }
 
-void *memset(void *__restrict dest, int c, size_t n)
+void *memset_kernel(void *__restrict dest, int c, size_t n)
     __attribute__((ifunc("resolve_memset")));
 
-
+void *memset(void *__restrict dest, int c, size_t n)
+{
+    return memset_kernel(dest, c, n);
+}

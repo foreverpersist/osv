@@ -23,7 +23,7 @@ inline void tracepointv<_id, std::tuple<s_args...>(r_args...), assign>::operator
             ".quad 1b \n\t"
             ".quad %l[slow_path] \n\t"
             ".popsection"
-            : : [type]"i"(&typeid(*this)), [id]"i"(_id) : : slow_path);
+            : : [type]"i"(_id), [id]"i"(_id) : : slow_path);
     return;
 slow_path:
     // We don't want register shuffling and function calls here, so pretend

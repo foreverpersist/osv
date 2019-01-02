@@ -5,21 +5,29 @@
 
 #include "processor-flags.h"
 
+PAGE_OFFSET = 0xffffffffc0000000
+
 .text
 .code32
 
 .data
 .align 4096
 ident_pt_l4:
-    .quad ident_pt_l3 + 0x67
-    .rept 511
+    .quad ident_pt_l3 - PAGE_OFFSET + 0x67
+    .rept 510
     .quad 0
     .endr
+    .quad ident_pt_l3_high - PAGE_OFFSET + 0x67
 ident_pt_l3:
-    .quad ident_pt_l2 + 0x67
+    .quad ident_pt_l2 - PAGE_OFFSET + 0x67
     .rept 511
     .quad 0
     .endr
+ident_pt_l3_high:
+    .rept 511
+    .quad 0
+    .endr
+    .quad ident_pt_l2 - PAGE_OFFSET + 0x67
 ident_pt_l2:
     index = 0
     .rept 512
@@ -29,7 +37,7 @@ ident_pt_l2:
 
 gdt_desc:
     .short gdt_end - gdt - 1
-    .long gdt
+    .long gdt - PAGE_OFFSET
 
 .align 8
 gdt = . - 8
@@ -65,19 +73,19 @@ init_stack_top = .
 start32:
     # boot16.S set %eax to ELF start address, we'll use it later
     mov %eax, %ebp
-    lgdt gdt_desc
+    lgdt gdt_desc-PAGE_OFFSET
     mov $0x10, %eax
     mov %eax, %ds
     mov %eax, %es
     mov %eax, %fs
     mov %eax, %gs
     mov %eax, %ss
-    ljmp $0x18, $1f
+    ljmp $0x18, $1f-PAGE_OFFSET
 1:
     and $~7, %esp
     mov $BOOT_CR4, %eax
     mov %eax, %cr4
-    lea ident_pt_l4, %eax
+    lea ident_pt_l4-PAGE_OFFSET, %eax
     mov %eax, %cr3
     mov $0xc0000080, %ecx
     mov $0x00000900, %eax
@@ -85,7 +93,7 @@ start32:
     wrmsr
     mov $BOOT_CR0, %eax
     mov %eax, %cr0
-    ljmpl $8, $start64
+    ljmpl $8, $start64-PAGE_OFFSET
 .code64
 .global start64
 start64:
@@ -128,7 +136,7 @@ smpboot:
     mov %eax, %gs
     mov smpboot_cr4-smpboot, %eax
     mov %eax, %cr4
-    lea ident_pt_l4, %eax
+    lea ident_pt_l4-PAGE_OFFSET, %eax
     mov %eax, %cr3
     mov smpboot_efer-smpboot, %eax
     mov smpboot_efer+4-smpboot, %edx
@@ -138,11 +146,11 @@ smpboot:
     mov smpboot_cr0-smpboot, %eax
     #1: jmp 1b
     mov %eax, %cr0 # now with paging
-    ljmp $8, $smpboot64
+    ljmp $8, $smpboot64-PAGE_OFFSET
 
 smpboot_gdt_desc:
     .short gdt_end - gdt - 1
-    .long gdt
+    .long gdt - PAGE_OFFSET
 .global smpboot_cr0
 smpboot_cr0:
     .long 0
