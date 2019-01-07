@@ -299,6 +299,10 @@ void linear_map(void* virt, phys addr, size_t size,
                 size_t slop = mmu::page_size,
                 mattr mem_attr = mmu::mattr_default);
 
+void linear_unmap(void* virt, phys addr, size_t size,
+                size_t slop = mmu::page_size,
+                mattr mem_attr = mmu::mattr_default);
+
 void free_initial_memory_range(uintptr_t addr, size_t size);
 void switch_to_runtime_page_tables();
 

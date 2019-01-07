@@ -586,6 +586,10 @@ void main_cont(int loader_argc, char** loader_argv)
 
     // multiple programs can be run -> separate their arguments
 
+    // Unmap kernel image at low address space
+    mmu::phys elf_phys = reinterpret_cast<mmu::phys>(elf_header);
+    mmu::linear_unmap(elf_start, elf_phys, elf_size, OSV_KERNEL_BASE);
+
     pthread_t pthread;
     // run the payload in a pthread, so pthread_self() etc. work
     // start do_main_thread unpinned (== pinned to all cpus)
