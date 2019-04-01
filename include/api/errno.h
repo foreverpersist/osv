@@ -17,6 +17,7 @@ int *__errno_location(void);
 
 #ifdef _GNU_SOURCE
 extern char *program_invocation_short_name, *program_invocation_name;
+extern char *__progname, *__progname_full;
 #endif
 
 #ifdef __cplusplus

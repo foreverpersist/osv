@@ -120,6 +120,8 @@ public:
             const std::string& main_function_name = "main",
             std::function<void()> post_main = nullptr);
 
+    application(shared_app_t old, void *(*start_routine) (void *), void *arg);
+
     ~application();
 
     /**
@@ -203,6 +205,7 @@ public:
     std::shared_ptr<elf::object> lib() const { return _lib; }
 
     elf::program *program();
+    sched::thread *thread();
 private:
     void new_program();
     void clone_osv_environ();

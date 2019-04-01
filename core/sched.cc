@@ -918,6 +918,7 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
     , _id(0)
     , _cleanup([this] { delete this; })
     , _app(app)
+    , _pt_root(mmu::get_root_pt(0))
     , _joiner(nullptr)
 {
     trace_thread_create(this);
@@ -929,6 +930,8 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
         }
         if (_app && app) {
             _app_runtime = app->runtime();
+            if (app->program())
+                _pt_root = app->program()->_pt_root;
         }
     }
     setup_tcb();
@@ -1022,6 +1025,13 @@ static void run_exit_notifiers()
     }
 }
 
+void thread::set_app_runtime(osv::application* app) {
+    assert(_app);
+    _app_runtime = app->runtime();
+    if (app->program())
+        _pt_root = app->program()->_pt_root;
+}
+
 // not in the header to avoid double inclusion between osv/app.hh and
 // osv/sched.hh
 osv::application *thread::current_app() {
@@ -1032,6 +1042,18 @@ osv::application *thread::current_app() {
     }
 
     return &(cur->_app_runtime->app);
+}
+
+mmu::pt_element<4> *thread::current_pt_root()
+{
+    if (override_current_app && override_current_app->program())
+    {
+        return override_current_app->program()->_pt_root;
+    }
+    auto cur = current();
+    if (!cur)
+        return mmu::get_root_pt(0);
+    return cur->_pt_root;
 }
 
 thread::~thread()

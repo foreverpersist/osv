@@ -60,6 +60,8 @@
 #include <api/sys/prctl.h>
 #include <sys/wait.h>
 #include <pty.h>
+#include <osv/osv_execve.h>
+#include <osv/app.hh>
 
 #define __LC_LAST 13
 
@@ -192,16 +194,53 @@ int getpagesize()
 }
 ALIAS(getpagesize, __getpagesize);
 
-int vfork()
+extern "C" void vfork_ret(user_frame uf);
+
+struct vfork_frame {
+    user_frame uf;
+    sched::thread *t;
+};
+
+static void *vfork_trampoline(void *arg)
 {
-    WARN_STUBBED();
-    return -1;
+    vfork_frame *vf = reinterpret_cast<vfork_frame *>(arg);
+    auto cur = sched::thread::current();
+    // set parent
+    vf->t = cur;
+    vfork_ret(vf->uf);
+    return nullptr;
 }
 
-int fork()
+extern "C" void do_vfork(user_frame *uf);
+void do_vfork(user_frame *uf)
 {
-    WARN_STUBBED();
-    return -1;
+    uf->rax = 0;
+    vfork_frame child;
+    pthread_t t;
+
+    child.t = sched::thread::current();
+    memcpy(&child.uf, uf, sizeof(user_frame));
+    pthread_create(&t, nullptr, vfork_trampoline, &child);
+    pthread_join(t, nullptr);
+    uf->rax = child.t->id();
+}
+
+extern "C" void do_fork(user_frame *uf);
+void do_fork(user_frame *uf)
+{
+    vfork_frame child;
+    osv::application *app;
+    sched::thread *t;
+
+    child.t = sched::thread::current();
+    memcpy(&child.uf, uf, sizeof(user_frame));
+    child.uf.rax = 0;
+    app = new osv::application(osv::application::get_current(), 
+        vfork_trampoline, &child);
+    t = app->thread();
+    t->set_app_runtime(app);
+    t->start();
+    uf->rax = t->id();
 }
 
 pid_t setsid(void)

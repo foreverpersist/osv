@@ -19,6 +19,25 @@ class gsi_edge_interrupt;
 class gsi_level_interrupt;
 class inter_processor_interrupt;
 
+struct user_frame {
+    ulong r15;
+    ulong r14;
+    ulong r13;
+    ulong r12;
+    ulong r11;
+    ulong r10;
+    ulong r9;
+    ulong r8;
+    ulong rbp;
+    ulong rdi;
+    ulong rsi;
+    ulong rdx;
+    ulong rcx;
+    ulong rbx;
+    ulong rax;
+    ulong rip;
+};
+
 struct exception_frame {
     ulong r15;
     ulong r14;

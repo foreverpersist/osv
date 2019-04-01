@@ -223,6 +223,46 @@ application::application(const std::string& command,
     }
 }
 
+application::application(shared_app_t old, void *(*start_routine) (void *), void *arg)
+: _runtime(new application_runtime(*this))
+{
+    // Copy _args
+    _args = old->_args;
+    // Copy _command
+    _command = old->_command;
+    // Copy _return_code
+    _return_code = old->_return_code;
+    // Copy _termination_requested
+    _termination_requested = old->_termination_requested;
+    // Copy _joiner
+    _joiner = old->_joiner;
+    // Use new _runtime based on this application
+    // Copy thread instance for _thread
+    pthread_fork(&_thread, nullptr, start_routine, arg);
+    // Copy program for _program
+    elf::program *old_program = old->_program.get();
+    if (!old_program)
+        old_program = elf::get_program();
+    _program.reset(new elf::program(old_program));
+    // Reuse new _lib, _libenviron, _libvdso, _main
+    // Because they are located at the same virtual address
+    _lib = old->_lib;
+    _libenviron = old->_libenviron;
+    _libvdso = old->_libvdso;
+    _main = old->_main;
+    // though the page table is temporarily invalid
+    // Just reuse _argv, _argv_buf supposing they are readonly
+    _argv.reset(old->_argv.get());
+    _argv_buf.reset(old->_argv_buf.get());
+    // Reuse _termination_mutex supposing it is clean
+    // Reset _termination_request_callbacks
+    _termination_request_callbacks.clear();
+    // Copy _terminated
+    _terminated.store(old->_terminated);
+    // Copy _post_main?
+    _post_main = _post_main;
+}
+
 void application::start()
 {
     // FIXME: we cannot create the thread inside the constructor because
@@ -243,7 +283,8 @@ TRACEPOINT(trace_app_destroy, "app=%p", application*);
 
 application::~application()
 {
-    assert(_runtime.use_count() == 1 || !_runtime);
+    debug_early_u64("~application _runtime.use_count ", _runtime.use_count());
+    if(_runtime.use_count() == 1 || !_runtime)
     trace_app_destroy(this);
 }
 
@@ -340,6 +381,8 @@ void application::prepare_argv(elf::program *program)
     char *c_path = (char *)(_command.c_str());
     program_invocation_name = c_path;
     program_invocation_short_name = basename(c_path);
+    __progname_full = program_invocation_name;
+    __progname = program_invocation_short_name;
 
     // Allocate a continuous buffer for arguments: _argv_buf
     // First count the trailing zeroes
@@ -502,9 +545,10 @@ void application::new_program()
             // This should hopefully be more than enough; It is not a
             // limit on the amount of memory this program can allocate -
             // just a limit on the code size.
-            void *addr =
-	        reinterpret_cast<void *>(elf::program_base) + ((i + 1) << 33);
-           _program.reset(new elf::program(addr));
+            // void *addr =
+            // reinterpret_cast<void *>(elf::program_base) + ((i + 1) << 33);
+            void *addr = reinterpret_cast<void *>(0x200000000000);
+           _program.reset(new elf::program(addr, false));
            return;
         }
     }
@@ -515,6 +559,13 @@ elf::program *application::program() {
     return _program.get();
 }
 
+sched::thread *application::thread() {
+    if (_thread)
+    {
+        return reinterpret_cast<sched::thread*>(pthread_get_thread(_thread));
+    }
+    return nullptr;
+}
 
 void application::clone_osv_environ()
 {

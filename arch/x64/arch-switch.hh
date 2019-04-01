@@ -88,6 +88,11 @@ void thread::switch_to()
     c->arch.set_exception_stack(_state.exception_stack);
     auto fpucw = processor::fnstcw();
     auto mxcsr = processor::stmxcsr();
+    if (_pt_root  != old->_pt_root)
+    {
+        debug_early_u64("CHANGE PAGE TALBE to ", reinterpret_cast<unsigned long long >(_pt_root));
+        processor::write_cr3(_pt_root->next_pt_addr());
+    }
     asm volatile
         ("mov %%rbp, %c[rbp](%0) \n\t"
          "movq $1f, %c[rip](%0) \n\t"

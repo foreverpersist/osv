@@ -259,9 +259,9 @@ void file::load_elf_header()
     // ET_EXEC (ordinary, position-dependent executables) but it will require
     // loading them at their specified address and moving the kernel out of
     // their way.
-    if (_ehdr.e_type != ET_DYN) {
+    if (_ehdr.e_type != ET_DYN && _ehdr.e_type != ET_EXEC) {
         throw osv::invalid_elf_error(
-                "bad executable type (only shared-object or PIE supported)");
+                "bad executable type (only shared-object or PIE or executable supported)");
     }
 }
 
@@ -291,6 +291,11 @@ void object::set_base(void* base)
                                   { return a.p_type == PT_LOAD
                                         && a.p_vaddr < b.p_vaddr; });
     _base = align(base, p->p_align, p->p_vaddr & (p->p_align - 1)) - p->p_vaddr;
+    if (_ehdr.e_type == ET_EXEC)
+    {
+        printf("[base]%llx -> [final base]%llx\n", base, _base);
+        _base = 0;
+    }
     auto q = std::min_element(_phdrs.begin(), _phdrs.end(),
                               [](Elf64_Phdr a, Elf64_Phdr b)
                                   { return a.p_type == PT_LOAD
@@ -1036,12 +1041,24 @@ program* s_program;
 void create_main_program()
 {
     assert(!s_program);
-    s_program = new elf::program();
+    s_program = new elf::program(reinterpret_cast<void*>(0x420000000000UL), true);
 }
 
-program::program(void* addr)
+program::program(void* addr, bool kernel)
     : _next_alloc(addr)
 {
+    if (kernel)
+    {
+        _vmas = &mmu::vma_list;
+        _vmas_mutex = &mmu::vma_list_mutex;
+        _pt_root = mmu::get_root_pt(0);
+    }
+    else
+    {
+        _vmas = new mmu::vma_list_type(0x00000, 0x800000000000);
+        _vmas_mutex = new rwlock_t();
+        _pt_root = new mmu::pt_element<4>();
+    }
     _core = std::make_shared<memory_image>(*this, (void*)ELF_IMAGE_START + PAGE_OFFSET);
     assert(_core->module_index() == core_module_index);
     _core->load_segments();
@@ -1076,6 +1093,43 @@ program::program(void* addr)
         _files[name] = _core;
     }
     _modules_rcu.assign(ml);
+}
+
+program::program(program *old)
+{
+    // Reset _mutex
+    _next_alloc = old->_next_alloc;
+    // Use _core as singleton is OK?
+    _core = old->_core;
+    // Deep copy _files?
+    _files = old->_files;
+    // Deep copy _module_index_list_rcu
+    auto list = (old->_module_index_list_rcu).read_by_owner();
+    auto newlist = new std::vector<object*>(*list);
+    _module_index_list_rcu.assign(newlist);
+    // Reset _module_index_list_mutex
+    // Deep copy _search_path
+    _search_path = old->_search_path;
+    // Deep copy _modules_rcu
+    auto old_modules = (old->_modules_rcu).read_by_owner();
+    std::unique_ptr<modules_list> new_modules (
+            new modules_list(*old_modules));
+    _modules_rcu.assign(new_modules.release());
+    // Reset _module_delete_mutex
+    // Copy _module_delete_disable
+    _module_delete_disable = old->_module_delete_disable;
+    // Deep copy modules_to_delete
+    _modules_to_delete = old->_modules_to_delete;
+    // Deep copy _loaded_objects_stack
+    _loaded_objects_stack = old->_loaded_objects_stack;
+    // Deep copy VMA (vma, anon_vma, file_vma, jvm_balloon_vma)
+    _vmas = new mmu::vma_list_type(0x00000, 0x400000000000);
+    _vmas_mutex = new rwlock_t();
+    mmu::copy_vmas(_vmas, old->_vmas);
+    // Copy PGT one by one, mark ptes of both parent and child cow
+    // Writing PGT is atomic operation, so no mutex is needed
+    _pt_root = new mmu::pt_element<4>();
+    mmu::copy_page_table(_pt_root, old->_pt_root);
 }
 
 void program::set_search_path(std::initializer_list<std::string> path)
@@ -1148,9 +1202,15 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
         }
     }
     if (f) {
+        printf("load_object %s\n", name.c_str());
         trace_elf_load(name.c_str());
         auto ef = std::shared_ptr<object>(new file(*this, f, name),
                 [=](object *obj) { remove_object(obj); });
+        if (ef->_ehdr.e_type == ET_EXEC)
+        {
+            ef->set_base(0);
+        }
+        else
         ef->set_base(_next_alloc);
         ef->setprivate(true);
         // We need to push the object at the end of the list (so that the main
@@ -1166,6 +1226,7 @@ program::load_object(std::string name, std::vector<std::string> extra_path,
         _modules_rcu.assign(new_modules.release());
         osv::rcu_dispose(old_modules);
         ef->load_segments();
+        if (ef->_ehdr.e_type != ET_EXEC)
         _next_alloc = ef->end();
         add_debugger_obj(ef.get());
         loaded_objects.push_back(ef);

@@ -6,18 +6,7 @@
 
 #include "cfi.S"
 
-.macro exception_entry name, handler, has_error_code
-	.global \name
-        .type \name, @function
-	\name :
-	.cfi_startproc simple
-	.cfi_signal_frame
-	.if \has_error_code == 0
-	pushq $0
-	.endif
-	.cfi_def_cfa %rsp, 0
-	.cfi_offset %rip, 8
-	.cfi_offset %rsp, 32
+.macro push_regs_to_frame
 	pushq_cfi %rax
 	pushq_cfi %rbx
 	pushq_cfi %rcx
@@ -36,8 +25,10 @@
 	mov %rsp, %rdi
 	subq $8, %rsp # 16-byte alignment
 	.cfi_adjust_cfa_offset 8
-	call \handler
-	addq $8, %rsp # 16-byte alignment
+.endm
+
+.macro pop_regs_from_frame
+    addq $8, %rsp
 	.cfi_adjust_cfa_offset -8
 	popq_cfi %r15
 	popq_cfi %r14
@@ -54,6 +45,23 @@
 	popq_cfi %rcx
 	popq_cfi %rbx
 	popq_cfi %rax
+.endm
+
+.macro exception_entry name, handler, has_error_code
+    .global \name
+    .type \name, @function
+    \name :
+    .cfi_startproc simple
+    .cfi_signal_frame
+    .if \has_error_code == 0
+    pushq $0
+    .endif
+    .cfi_def_cfa %rsp, 0
+    .cfi_offset %rip, 8
+    .cfi_offset %rsp, 32
+    push_regs_to_frame
+    call \handler
+    pop_regs_from_frame
 	add $8, %rsp
 	iretq
 	.cfi_endproc
@@ -89,6 +97,38 @@ exception_noerror_entry ex_mf, math_fault
 exception_error_entry ex_ac, alignment_check
 exception_noerror_entry ex_mc, machine_check
 exception_noerror_entry ex_xm, simd_exception
+
+.global vfork
+.type vfork, @function
+vfork:
+    .cfi_startproc simple
+    .cfi_signal_frame
+    .cfi_def_cfa %rsp, 0
+    .cfi_offset %rip, 8
+    .cfi_offset %rsp, 32
+    push_regs_to_frame
+    call do_vfork
+.global vfork_ret
+vfork_ret:
+    pop_regs_from_frame
+    retq
+    .cfi_endproc
+
+.global fork
+.type fork, @function
+fork:
+    .cfi_startproc simple
+    .cfi_signal_frame
+    .cfi_def_cfa %rsp, 0
+    .cfi_offset %rip, 8
+    .cfi_offset %rsp, 32
+    push_regs_to_frame
+    call do_fork
+.global fork_ret
+fork_ret:
+    pop_regs_from_frame
+    retq
+    .cfi_endproc
 
 .align 16
 .global interrupt_entry

@@ -30,6 +30,11 @@ void page_fault(exception_frame *ef)
     }
     // The following code may sleep. So let's verify the fault did not happen
     // when preemption was disabled, or interrupts were disabled.
+    if (!sched::preemptable())
+    {
+        debug_early_u64("page_fault: ", addr);
+        debug_early_u64("error_code: ", ef->get_error());
+    }
     assert(sched::preemptable());
     assert(ef->rflags & processor::rflags_if);
 
@@ -174,6 +179,7 @@ bool fast_sigsegv_check(uintptr_t addr, exception_frame* ef)
         }
         void pte(pt_element<1> pte) override {
             // large ptes are never cow yet
+            _result = !pte_is_cow(pte) && !pte.writable();
         }
     } visitor;
 

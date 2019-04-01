@@ -32,6 +32,8 @@
 char *program_invocation_name;
 char *program_invocation_short_name;
 
+char *__progname=0, *__progname_full=0;
+
 int libc_error(int err)
 {
     errno = err;

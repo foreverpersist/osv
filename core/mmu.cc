@@ -5,6 +5,7 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
+#include <osv/elf.hh>
 #include <osv/mmu.hh>
 #include <osv/mempool.hh>
 #include "processor.hh"
@@ -43,32 +44,7 @@ extern const char text_start[], text_end[];
 
 namespace mmu {
 
-namespace bi = boost::intrusive;
 
-class vma_compare {
-public:
-    bool operator ()(const vma& a, const vma& b) const {
-        return a.addr() < b.addr();
-    }
-};
-
-typedef boost::intrusive::set<vma,
-                              bi::compare<vma_compare>,
-                              bi::member_hook<vma,
-                                              bi::set_member_hook<>,
-                                              &vma::_vma_list_hook>,
-                              bi::optimize_size<true>
-                              > vma_list_base;
-
-struct vma_list_type : vma_list_base {
-    vma_list_type() {
-        // insert markers for the edges of allocatable area
-        // simplifies searches
-        insert(*new anon_vma(addr_range(0, 0), 0, 0));
-        uintptr_t e = 0x800000000000;
-        insert(*new anon_vma(addr_range(e, e), 0, 0));
-    }
-};
 
 __attribute__((init_priority((int)init_prio::vma_list)))
 vma_list_type vma_list;
@@ -153,12 +129,42 @@ void allocate_intermediate_level(hw_ptep<N> ptep)
     phys pt_page = allocate_intermediate_level<N>([](int i) {
         return make_empty_pte<N>();
     });
+    phys gpt_page = mmu::get_root_pt(0)->next_pt_addr();
+    // printf("allocate_intermediate_level [N]%d [pt_page]%llx at %llx, [gpt_page]%llx\n", 
+        // N, pt_page, sched::thread::current_pt_root()->next_pt_addr(), gpt_page);
+    if (N == 4 && gpt_page > 0)
+    {
+        // printf("Copy page table root\n");
+        pt_element<4>* pt = phys_cast<pt_element<4>>(pt_page);
+        pt_element<4>* gpt = phys_cast<pt_element<4>>(gpt_page);
+        for (auto i = 1 << 8; i < pte_per_page; i++)
+        {
+            pt[i] = gpt[i];
+        }
+    }
     if (!ptep.compare_exchange(make_empty_pte<N>(), make_intermediate_pte(ptep, pt_page))) {
         memory::free_page(phys_to_virt(pt_page));
     }
 }
 
-// only 4k can be cow for now
+// only 4k/2M can be cow for now
+template<int N>
+pt_element<N> pte_mark_cow(pt_element<N> pte, bool cow)
+{
+    return pte;
+}
+
+template<>
+pt_element<1> pte_mark_cow(pt_element<1> pte, bool cow)
+{
+    if (cow) {
+        pte.set_writable(false);
+    }
+    pte.set_sw_bit(pte_cow, cow);
+    return pte;
+}
+
+template<>
 pt_element<0> pte_mark_cow(pt_element<0> pte, bool cow)
 {
     if (cow) {
@@ -217,8 +223,9 @@ struct page_allocator {
 
 unsigned long all_vmas_size()
 {
-    SCOPE_LOCK(vma_list_mutex.for_read());
-    return std::accumulate(vma_list.begin(), vma_list.end(), size_t(0), [](size_t s, vma& v) { return s + v.size(); });
+    auto program = elf::get_program();
+    SCOPE_LOCK(program->_vmas_mutex->for_read());
+    return std::accumulate(program->_vmas->begin(), program->_vmas->end(), size_t(0), [](size_t s, vma& v) { return s + v.size(); });
 }
 
 void clamp(uintptr_t& vstart1, uintptr_t& vend1,
@@ -352,7 +359,8 @@ template<typename PageOp>
         void map_range(uintptr_t vma_start, uintptr_t vstart, size_t size, PageOp& page_mapper, size_t slop = page_size)
 {
     map_level<PageOp, 4> pt_mapper(vma_start, vstart, size, page_mapper, slop);
-    pt_mapper(hw_ptep<4>::force(mmu::get_root_pt(vstart)));
+    // pt_mapper(hw_ptep<4>::force(mmu::get_root_pt(vstart)));
+    pt_mapper(hw_ptep<4>::force(sched::thread::current_pt_root()));
 }
 
 template<typename PageOp, int ParentLevel> class map_level {
@@ -876,7 +884,8 @@ public:
 // The complexity is logarithmic in the number of vmas in vma_list.
 static inline vma_list_type::iterator
 find_intersecting_vma(uintptr_t addr) {
-    auto vma = vma_list.lower_bound(addr, addr_compare());
+    auto vmas = elf::get_program()->_vmas;
+    auto vma = vmas->lower_bound(addr, addr_compare());
     if (vma->start() == addr) {
         return vma;
     }
@@ -885,7 +894,7 @@ find_intersecting_vma(uintptr_t addr) {
     if (addr >= vma->start() && addr < vma->end()) {
         return vma;
     } else {
-        return vma_list.end();
+        return vmas->end();
     }
 }
 
@@ -897,10 +906,16 @@ find_intersecting_vma(uintptr_t addr) {
 static inline std::pair<vma_list_type::iterator, vma_list_type::iterator>
 find_intersecting_vmas(const addr_range& r)
 {
+    vma_list_type *vmas;
+    auto prog = elf::get_program();
+    if (!prog)
+        vmas = &vma_list;
+    else
+        vmas = prog->_vmas;
     if (r.end() <= r.start()) { // empty range, so nothing matches
-        return {vma_list.end(), vma_list.end()};
+        return {vmas->end(), vmas->end()};
     }
-    auto start = vma_list.lower_bound(r.start(), addr_compare());
+    auto start = vmas->lower_bound(r.start(), addr_compare());
     if (start->start() > r.start()) {
         // The previous vma might also intersect with our range if it ends
         // after our range's start.
@@ -912,11 +927,11 @@ find_intersecting_vmas(const addr_range& r)
     // If the start vma is actually beyond the end of the search range,
     // there is no intersection.
     if (start->start() >= r.end()) {
-        return {vma_list.end(), vma_list.end()};
+        return {vmas->end(), vmas->end()};
     }
     // end is the first vma starting >= r.end(), so any previous vma (after
     // start) surely started < r.end() so is part of the intersection.
-    auto end = vma_list.lower_bound(r.end(), addr_compare());
+    auto end = vmas->lower_bound(r.end(), addr_compare());
     return {start, end};
 }
 
@@ -957,9 +972,10 @@ uintptr_t find_hole(uintptr_t start, uintptr_t size)
     uintptr_t good_enough = 0;
 
     // FIXME: use lower_bound or something
-    auto p = vma_list.begin();
+    auto program = elf::get_program();
+    auto p = program->_vmas->begin();
     auto n = std::next(p);
-    while (n != vma_list.end()) {
+    while (n != program->_vmas->end()) {
         if (start >= p->end() && start + size <= n->start()) {
             return start;
         }
@@ -995,7 +1011,7 @@ ulong evacuate(uintptr_t start, uintptr_t end)
             if (dead.has_flags(mmap_jvm_heap)) {
                 memory::stats::on_jvm_heap_free(size);
             }
-            vma_list.erase(dead);
+            elf::get_program()->_vmas->erase(dead);
             delete &dead;
         }
     }
@@ -1032,11 +1048,29 @@ private:
         return addr;
     }
     template<int N>
-    bool set_pte(void *addr, hw_ptep<N> ptep, pt_element<N> pte) {
+    bool set_pte(void *addr, hw_ptep<N> ptep, pt_element<N> pte, 
+        bool write, uintptr_t size) {
         if (!addr) {
             throw std::exception();
         }
-        if (!write_pte(addr, ptep, make_empty_pte<N>(), pte)) {
+        if (write && pte.valid() && pte_is_cow(pte))
+        {
+            debug_early_u64("Do COW for ", reinterpret_cast<unsigned long long>(addr));
+            // Copy memory content and set writable
+            memcpy(addr, phys_to_virt(pte.next_pt_addr()), size);
+            pte.set_writable(true);
+            pte.set_sw_bit(pte_cow, false);
+            if (!write_pte(addr, ptep, pte))
+            {
+                if (pt_level_traits<N>::large_capable::value) {
+                memory::free_huge_page(addr, pt_level_traits<N>::size::value);
+                } else {
+                    memory::free_page(addr);
+                }
+                return false;
+            }
+        }
+        else if (!write_pte(addr, ptep, make_empty_pte<N>(), pte)) {
             if (pt_level_traits<N>::large_capable::value) {
                 memory::free_huge_page(addr, pt_level_traits<N>::size::value);
             } else {
@@ -1048,11 +1082,11 @@ private:
     }
 public:
     virtual bool map(uintptr_t offset, hw_ptep<0> ptep, pt_element<0> pte, bool write) override {
-        return set_pte(fill(memory::alloc_page(), offset, page_size), ptep, pte);
+        return set_pte(fill(memory::alloc_page(), offset, page_size), ptep, pte, write, page_size);
     }
     virtual bool map(uintptr_t offset, hw_ptep<1> ptep, pt_element<1> pte, bool write) override {
         size_t size = pt_level_traits<1>::size::value;
-        return set_pte(fill(memory::alloc_huge_page(size), offset, size), ptep, pte);
+        return set_pte(fill(memory::alloc_huge_page(size), offset, size), ptep, pte, write, size);
     }
     virtual bool unmap(void *addr, uintptr_t offset, hw_ptep<0> ptep) override {
         clear_pte(ptep);
@@ -1127,7 +1161,7 @@ uintptr_t allocate(vma *v, uintptr_t start, size_t size, bool search)
     if (search) {
         // search for unallocated hole around start
         if (!start) {
-            start = 0x200000000000ul;
+            start = 0x400000000000ul;
         }
         start = find_hole(start, size);
     } else {
@@ -1136,7 +1170,7 @@ uintptr_t allocate(vma *v, uintptr_t start, size_t size, bool search)
     }
     v->set(start, start+size);
 
-    vma_list.insert(*v);
+    elf::get_program()->_vmas->insert(*v);
 
     return start;
 }
@@ -1202,7 +1236,7 @@ static void nohugepage(void* addr, size_t length)
 
 error advise(void* addr, size_t size, int advice)
 {
-    WITH_LOCK(vma_list_mutex.for_write()) {
+    WITH_LOCK(elf::get_program()->_vmas_mutex->for_write()) {
         if (!ismapped(addr, size)) {
             return make_error(ENOMEM);
         }
@@ -1234,7 +1268,7 @@ void* map_anon(const void* addr, size_t size, unsigned flags, unsigned perm)
     size = align_up(size, mmu::page_size);
     auto start = reinterpret_cast<uintptr_t>(addr);
     auto* vma = new mmu::anon_vma(addr_range(start, start + size), perm, flags);
-    SCOPE_LOCK(vma_list_mutex.for_write());
+    SCOPE_LOCK(elf::get_program()->_vmas_mutex->for_write());
     auto v = (void*) allocate(vma, start, size, search);
     if (flags & mmap_populate) {
         populate_vma(vma, v, size);
@@ -1260,7 +1294,7 @@ void* map_file(const void* addr, size_t size, unsigned flags, unsigned perm,
     auto start = reinterpret_cast<uintptr_t>(addr);
     auto *vma = f->mmap(addr_range(start, start + size), flags | mmap_file, perm, offset).release();
     void *v;
-    WITH_LOCK(vma_list_mutex.for_write()) {
+    WITH_LOCK(elf::get_program()->_vmas_mutex->for_write()) {
         v = (void*) allocate(vma, start, size, search);
         if (flags & mmap_populate) {
             populate_vma(vma, v, std::min(size, align_up(::size(f), page_size)));
@@ -1349,9 +1383,12 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
         return;
     }
     addr = align_down(addr, mmu::page_size);
-    WITH_LOCK(vma_list_mutex.for_read()) {
+    auto prog = elf::get_program();
+    WITH_LOCK(prog->_vmas_mutex->for_read()) {
         auto vma = find_intersecting_vma(addr);
-        if (vma == vma_list.end() || access_fault(*vma, ef->get_error())) {
+        if (vma == prog->_vmas->end() || access_fault(*vma, ef->get_error())) {
+            printf("vm_fault, empty[%d] addr[%llx] [error]%ld [rip]%llx thread[%llx] perm[%d]\n", 
+                vma == prog->_vmas->end(), addr, ef->get_error(), ef->rip, sched::thread::current(), vma->perm());
             vm_sigsegv(addr, ef);
             trace_mmu_vm_fault_sigsegv(addr, ef->get_error(), "slow");
             return;
@@ -1416,7 +1453,8 @@ unsigned vma::flags() const
 
 void vma::update_flags(unsigned flag)
 {
-    assert(vma_list_mutex.wowned());
+    auto program = elf::get_program();
+    assert(program->_vmas_mutex->wowned());
     _flags |= flag;
 }
 
@@ -1482,7 +1520,7 @@ void anon_vma::split(uintptr_t edge)
     }
     vma* n = new anon_vma(addr_range(edge, _range.end()), _perm, _flags);
     set(_range.start(), edge);
-    vma_list.insert(*n);
+    elf::get_program()->_vmas->insert(*n);
 }
 
 error anon_vma::sync(uintptr_t start, uintptr_t end)
@@ -1589,7 +1627,7 @@ jvm_balloon_vma::~jvm_balloon_vma()
     // it believes the objects are no longer valid. It could be the case
     // for a dangling mapping representing a balloon that was already moved
     // out.
-    vma_list.erase(*this);
+    elf::get_program()->_vmas->erase(*this);
     assert(!(_real_flags & mmap_jvm_balloon));
     mmu::map_anon(addr(), size(), _real_flags, _real_perm);
 
@@ -1604,16 +1642,18 @@ jvm_balloon_vma::~jvm_balloon_vma()
 
 ulong map_jvm(unsigned char* jvm_addr, size_t size, size_t align, balloon_ptr b)
 {
+    // printf("map_jvm\n");
     auto addr = align_up(jvm_addr, align);
     auto start = reinterpret_cast<uintptr_t>(addr);
 
     vma* v;
-    WITH_LOCK(vma_list_mutex.for_read()) {
+    auto program = elf::get_program();
+    WITH_LOCK(program->_vmas_mutex->for_read()) {
         u64 a = reinterpret_cast<u64>(addr);
         v = &*find_intersecting_vma(a);
 
         // It has to be somewhere!
-        assert(v != &*vma_list.end());
+        assert(v != &*(program->_vmas->end()));
         assert(v->has_flags(mmap_jvm_heap) | v->has_flags(mmap_jvm_balloon));
         if (v->has_flags(mmap_jvm_balloon) && (v->addr() == addr)) {
             jvm_balloon_vma *j = static_cast<jvm_balloon_vma *>(&*v);
@@ -1626,7 +1666,7 @@ ulong map_jvm(unsigned char* jvm_addr, size_t size, size_t align, balloon_ptr b)
 
     auto* vma = new mmu::jvm_balloon_vma(jvm_addr, start, start + size, b, v->perm(), v->flags());
 
-    WITH_LOCK(vma_list_mutex.for_write()) {
+    WITH_LOCK(program->_vmas_mutex->for_write()) {
         // This means that the mapping that we had before was a balloon mapping
         // that was laying around and wasn't updated to an anon mapping. If we
         // allow it to split it would significantly complicate our code, since
@@ -1656,7 +1696,7 @@ ulong map_jvm(unsigned char* jvm_addr, size_t size, size_t align, balloon_ptr b)
                     assert(jvma->start() != start);
                     // Since we will change its position in the tree, for the sake of future
                     // lookups we need to reinsert it.
-                    vma_list.erase(*jvma);
+                    program->_vmas->erase(*jvma);
                     if (jvma->start() < start) {
                         assert(jvma->partial() >= (jvma->end() - start));
                         jvma->set(jvma->start(), start);
@@ -1664,12 +1704,12 @@ ulong map_jvm(unsigned char* jvm_addr, size_t size, size_t align, balloon_ptr b)
                         assert(jvma->partial() >= (end - jvma->start()));
                         jvma->set(end, jvma->end());
                     }
-                    vma_list.insert(*jvma);
+                    program->_vmas->insert(*jvma);
                 } else {
                     // Note how v and jvma are different. This is because this one,
                     // we will delete.
                     auto& v = *i--;
-                    vma_list.erase(v);
+                    program->_vmas->erase(v);
                     // Finish the move. In practice, it will temporarily remap an
                     // anon mapping here, but this should be rare. Let's not
                     // complicate the code to optimize it. There are no
@@ -1681,7 +1721,7 @@ ulong map_jvm(unsigned char* jvm_addr, size_t size, size_t align, balloon_ptr b)
         }
 
         evacuate(start, start + size);
-        vma_list.insert(*vma);
+        program->_vmas->insert(*vma);
         return vma->size();
     }
     return 0;
@@ -1733,7 +1773,7 @@ void file_vma::split(uintptr_t edge)
     auto off = offset(edge);
     vma *n = _file->mmap(addr_range(edge, _range.end()), _flags, _perm, off).release();
     set(_range.start(), edge);
-    vma_list.insert(*n);
+    elf::get_program()->_vmas->insert(*n);
 }
 
 error file_vma::sync(uintptr_t start, uintptr_t end)
@@ -1929,8 +1969,9 @@ error mincore(const void *addr, size_t length, unsigned char *vec)
 std::string procfs_maps()
 {
     std::ostringstream os;
-    WITH_LOCK(vma_list_mutex.for_read()) {
-        for (auto& vma : vma_list) {
+    auto prog = elf::get_program();
+    WITH_LOCK(prog->_vmas_mutex->for_read()) {
+        for (auto& vma : *(prog->_vmas)) {
             char read    = vma.perm() & perm_read  ? 'r' : '-';
             char write   = vma.perm() & perm_write ? 'w' : '-';
             char execute = vma.perm() & perm_exec  ? 'x' : '-';
@@ -1945,6 +1986,149 @@ std::string procfs_maps()
         }
     }
     return os.str();
+}
+
+void copy_vmas(vma_list_type *vmas, vma_list_type *old)
+{
+    for (auto& v: *old)
+    {
+        // auto type = typeid(v);
+        if (typeid(v) == typeid(mmu::anon_vma))
+        {
+            vmas->insert(*new anon_vma(addr_range(v.start(), v.end()), 
+                v.perm(), v.flags()));
+        }
+        else if (typeid(v) == typeid(mmu::file_vma))
+        {
+            file_vma *fv = reinterpret_cast<file_vma*>(&v);
+            vmas->insert(*new file_vma(addr_range(v.start(), v.end()),
+                v.perm(), v.flags(), fv->file(), 
+                fv->offset(), v.page_ops()));
+        }
+        else if (typeid(v) == typeid(mmu::jvm_balloon_vma))
+        {
+            jvm_balloon_vma *jv = reinterpret_cast<jvm_balloon_vma*>(&v); 
+            vmas->insert(*new jvm_balloon_vma(jv->jvm_addr(), 
+            v.start(), v.end(), jv->balloon(), 
+            v.perm(), v.flags()));
+        }
+    }
+}
+
+template<int N>
+void copy_pt(hw_ptep<N> parent, hw_ptep<N> old, uintptr_t start)
+{
+    assert(N > 0);
+    // Define read()
+    if (!parent.read().valid())
+    {
+        allocate_intermediate_level(parent);
+    }
+    // Define follow()
+    auto pt = hw_ptep<N-1>::force(phys_cast<pt_element<N-1>>(parent.read().next_pt_addr()));
+    auto old_pt = hw_ptep<N-1>::force(phys_cast<pt_element<N-1>>(old.read().next_pt_addr()));
+    auto num = pte_per_page;
+    phys step = phys(1) << (page_size_shift + (N-1) * pte_per_page_shift);
+    void *addr;
+    size_t size;
+
+    if (N == 4)
+    {
+        // Use the same kernel page table: 0x800000000000~...
+        num = 1 << 8;
+    }
+
+    for (auto i = 0; i < num; i++)
+    {
+        // Skip empty items
+        auto old_ptep = old_pt.at(i);
+        auto ptep = pt.at(i);
+        auto pte = old_ptep.read();
+        if (!pte.valid())
+        {
+            start += step;
+            continue;
+        }
+
+        if (unsigned(N) <= nr_page_sizes)
+        {
+            if (N == 2)
+            {
+                if (pte.large())
+                {
+                    // 2M pages
+                    // Copy value and set COW
+                    if (pte.writable())
+                    {
+                        // pte.set_writable(false);
+                        // pte.set_sw_bit(pte_cow, true);
+                        // pte = pte_mark_cow(pte, true);
+                        // old_ptep.write(pte);
+                        // ptep.write(pte);
+
+                        size = pt_level_traits<1>::size::value;
+                        addr = memory::alloc_huge_page(size);
+                        memcpy(addr, phys_to_virt(pte.next_pt_addr()), size);
+                        if (!write_pte(addr, ptep, pte))
+                        {
+                            memory::free_huge_page(addr, size);
+                        }
+                    }
+                    else
+                    {
+                        ptep.write(pte);
+                    }
+                }
+                else
+                {
+                    // Normal level 1 ptep
+                    copy_pt(ptep, old_ptep, start);
+                }
+            }
+            else
+            {
+                // 4K pages
+                // Copy value and set COW
+                if (pte.writable())
+                {
+                    // pte.set_writable(false);
+                    // pte.set_sw_bit(pte_cow, true);
+                    // pte = pte_mark_cow(pte, true);
+                    // old_ptep.write(pte);
+                    // ptep.write(pte);
+
+                    size = pt_level_traits<0>::size::value;
+                    addr = memory::alloc_page();
+                    memcpy(addr, phys_to_virt(pte.next_pt_addr()), size);
+                    if (!write_pte(addr, ptep, pte))
+                    {
+                        memory::free_page(addr);
+                    }
+                }
+                else
+                {
+                    ptep.write(pte);
+                }
+            }
+        }
+        else
+        {
+            // Normal level N-1 ptep
+            copy_pt(ptep, old_ptep, start);
+        }
+        start += step;
+    }
+}
+
+template<>
+void copy_pt(hw_ptep<0> parent, hw_ptep<0> old, uintptr_t start)
+{
+
+}
+
+void copy_page_table(pt_element<4> *pt, pt_element<4> *old)
+{
+    copy_pt(hw_ptep<4>::force(pt), hw_ptep<4>::force(old), 0);
 }
 
 }

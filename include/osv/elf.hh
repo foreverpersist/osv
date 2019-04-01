@@ -19,6 +19,9 @@
 
 #include "arch-elf.hh"
 
+#include <osv/mmu.hh>
+#include <osv/rwlock.h>
+
 /// Marks a shared object as locked in memory and forces eager resolution of
 /// PLT entries so OSv APIs like preempt_disable() can be used
 #define OSV_ELF_MLOCK_OBJECT() asm(".pushsection .note.osv-mlock, \"a\"; .long 0, 0, 0; .popsection")
@@ -388,10 +391,12 @@ private:
     void collect_dependencies(std::unordered_set<elf::object*>& ds);
     void prepare_initial_tls(void* buffer, size_t size, std::vector<ptrdiff_t>& offsets);
     void alloc_static_tls();
+public:
+    Elf64_Ehdr _ehdr;
+
 protected:
     program& _prog;
     std::string _pathname;
-    Elf64_Ehdr _ehdr;
     std::vector<Elf64_Phdr> _phdrs;
     void* _base;
     void* _end;
@@ -477,7 +482,7 @@ public:
 };
 
 
-constexpr uintptr_t program_base = 0x100000000000UL;
+constexpr uintptr_t program_base = 0x420000000000UL;
 
 /**
  * The dynamic linker's view of the running program.
@@ -504,7 +509,9 @@ class program {
 public:
     static const ulong core_module_index;
 
-    explicit program(void* base = reinterpret_cast<void*>(program_base));
+    explicit program(void* base = reinterpret_cast<void*>(program_base), bool kernel = true);
+
+    program(program *old);
     /**
      * Load a shared library, and return an interface to it.
      *
@@ -582,6 +589,11 @@ public:
     dladdr_info lookup_addr(const void* addr);
     elf::object *object_containing_addr(const void *addr);
     inline object *tls_object(ulong module);
+    // Private VMA
+    mmu::vma_list_type *_vmas;
+    rwlock_t *_vmas_mutex;
+    // Private PGT
+    mmu::pt_element<4> *_pt_root;
 private:
     void add_debugger_obj(object* obj);
     void del_debugger_obj(object* obj);

@@ -20,6 +20,7 @@
 #include <osv/mmu-defs.hh>
 #include <osv/align.hh>
 #include <osv/trace.hh>
+#include <osv/rwlock.h>
 
 #define PAGE_OFFSET 0xffffffffc0000000
 
@@ -111,6 +112,7 @@ public:
     virtual error sync(uintptr_t start, uintptr_t end) override;
     virtual void fault(uintptr_t addr, exception_frame *ef) override;
     void detach_balloon();
+    balloon_ptr balloon() { return _balloon; }
     unsigned char *jvm_addr() { return _jvm_addr; }
     unsigned char *effective_jvm_addr() { return _effective_jvm_addr; }
     bool add_partial(size_t partial, unsigned char *eff);
@@ -149,6 +151,37 @@ public:
     virtual bool put_page(void *addr, uintptr_t offset, hw_ptep<1> ptep) override;
 };
 
+namespace bi = boost::intrusive;
+
+class vma_compare {
+public:
+    bool operator ()(const vma& a, const vma& b) const {
+        return a.addr() < b.addr();
+    }
+};
+
+typedef boost::intrusive::set<vma,
+                              bi::compare<vma_compare>,
+                              bi::member_hook<vma,
+                                              bi::set_member_hook<>,
+                                              &vma::_vma_list_hook>,
+                              bi::optimize_size<true>
+                              > vma_list_base;
+
+struct vma_list_type : vma_list_base {
+    vma_list_type(uintptr_t start = 0, 
+        uintptr_t end = 0x800000000000) {
+        // insert markers for the edges of allocatable area
+        // simplifies searches
+        insert(*new anon_vma(addr_range(start, start), 0, 0));
+        // uintptr_t e = 0x800000000000;
+        insert(*new anon_vma(addr_range(end, end), 0, 0));
+    }
+};
+
+extern vma_list_type vma_list;
+extern rwlock_t vma_list_mutex;
+
 void* map_file(const void* addr, size_t size, unsigned flags, unsigned perm,
               fileref file, f_offset offset);
 void* map_anon(const void* addr, size_t size, unsigned flags, unsigned perm);
@@ -168,6 +201,12 @@ template<int N>
 inline bool pte_is_cow(pt_element<N> pte)
 {
     return false;
+}
+
+template<>
+inline bool pte_is_cow(pt_element<1> pte)
+{
+    return pte.sw_bit(pte_cow); // only 2M/4k pages can be cow for now
 }
 
 template<>
@@ -251,12 +290,15 @@ inline bool write_pte(void *addr, hw_ptep<N> ptep, pt_element<N> pte)
     return ptep.compare_exchange(ptep.read(), pte);
 }
 
-pt_element<0> pte_mark_cow(pt_element<0> pte, bool cow);
+template<int N>
+pt_element<N> pte_mark_cow(pt_element<N> pte, bool cow);
+// pt_element<0> pte_mark_cow(pt_element<0> pte, bool cow);
 
 template <typename OutputFunc>
 inline
 void virt_to_phys(void* vaddr, size_t len, OutputFunc out)
 {
+#ifdef CONF_debug_memory
     if (CONF_debug_memory && vaddr >= debug_base) {
         while (len) {
             auto next = std::min(align_down(vaddr + page_size, page_size), vaddr + len);
@@ -265,9 +307,10 @@ void virt_to_phys(void* vaddr, size_t len, OutputFunc out)
             vaddr = next;
             len -= delta;
         }
-    } else {
-        out(virt_to_phys(vaddr), len);
+        return;
     }
+#endif
+    out(virt_to_phys(vaddr), len);
 }
 
 void* phys_to_virt(phys pa);
@@ -319,6 +362,10 @@ void vm_fault(uintptr_t addr, exception_frame* ef);
 std::string procfs_maps();
 
 unsigned long all_vmas_size();
+
+void copy_vmas(vma_list_type* vmas, vma_list_type *old);
+
+void copy_page_table(mmu::pt_element<4> *pt, mmu::pt_element<4> *old);
 
 }
 

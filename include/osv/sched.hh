@@ -25,6 +25,7 @@
 #include <osv/rcu.hh>
 #include <osv/clock.hh>
 #include <osv/timer-set.hh>
+#include <osv/mmu-defs.hh>
 
 typedef float runtime_t;
 
@@ -530,10 +531,12 @@ public:
         assert(_app);
         _app_runtime = app;
     }
+    void set_app_runtime(osv::application* app);
     std::shared_ptr<osv::application_runtime> app_runtime() {
         return _app_runtime;
     }
     static osv::application *current_app();
+    static mmu::pt_element<4> *current_pt_root();
     bool migratable() const { return _migration_lock_counter == 0; }
     bool pinned() const { return _pinned; }
     /**
@@ -697,6 +700,7 @@ private:
     std::vector<char*> _tls;
     bool _app;
     std::shared_ptr<osv::application_runtime> _app_runtime;
+    mmu::pt_element<4> *_pt_root;
     void destroy();
     friend class thread_ref_guard;
     friend void thread_main_c(thread* t);
