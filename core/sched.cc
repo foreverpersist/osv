@@ -919,6 +919,7 @@ thread::thread(std::function<void ()> func, attr attr, bool main, bool app)
     , _cleanup([this] { delete this; })
     , _app(app)
     , _pt_root(mmu::get_root_pt(0))
+    , _parent(nullptr)
     , _joiner(nullptr)
 {
     trace_thread_create(this);
@@ -1364,6 +1365,11 @@ void thread::timer_fired()
 unsigned int thread::id() const
 {
     return _id;
+}
+
+unsigned int thread::pid() const
+{
+    return _parent ? _parent->_id : 0;
 }
 
 void thread::set_name(std::string name)

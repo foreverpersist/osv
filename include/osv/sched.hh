@@ -560,6 +560,9 @@ public:
     void set_name(std::string name);
     std::string name() const;
     std::array<char, 16> name_raw() const { return _attr._name; }
+    void set_parent(thread *parent) { _parent = parent; }
+    thread *parent() { return _parent; }
+    unsigned int pid() const __attribute__((no_instrument_function));
     /**
      * Set thread's priority
      *
@@ -701,6 +704,7 @@ private:
     bool _app;
     std::shared_ptr<osv::application_runtime> _app_runtime;
     mmu::pt_element<4> *_pt_root;
+    thread *_parent;
     void destroy();
     friend class thread_ref_guard;
     friend void thread_main_c(thread* t);

@@ -206,6 +206,7 @@ static void *vfork_trampoline(void *arg)
     vfork_frame *vf = reinterpret_cast<vfork_frame *>(arg);
     auto cur = sched::thread::current();
     // set parent
+    cur->set_parent(vf->t);
     vf->t = cur;
     vfork_ret(vf->uf);
     return nullptr;
