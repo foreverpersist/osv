@@ -31,7 +31,7 @@ ident_pt_l3_high:
 ident_pt_l2:
     index = 0
     .rept 512
-    .quad (index << 21) + 0x1e7
+    .quad (index << 21) + 0xe7
     index = index + 1
     .endr
 

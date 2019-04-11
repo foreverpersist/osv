@@ -1038,7 +1038,7 @@ void thread::set_app_runtime(osv::application* app) {
 osv::application *thread::current_app() {
     auto cur = current();
 
-    if (!cur->_app_runtime) {
+    if (!cur || !cur->_app_runtime) {
         return nullptr;
     }
 

@@ -181,6 +181,7 @@ struct vma_list_type : vma_list_base {
 
 extern vma_list_type vma_list;
 extern rwlock_t vma_list_mutex;
+extern mutex page_table_high_mutex;
 
 void* map_file(const void* addr, size_t size, unsigned flags, unsigned perm,
               fileref file, f_offset offset);

@@ -53,6 +53,7 @@ struct arch_cpu {
     void set_exception_stack(arch_thread* t);
     char* get_exception_stack();
     void set_interrupt_stack(arch_thread* t);
+    char* get_interrupt_stack();
     void enter_exception();
     void exit_exception();
 };
@@ -144,6 +145,11 @@ inline void arch_cpu::set_interrupt_stack(arch_thread* t)
 {
     auto& s = t->interrupt_stack;
     set_ist_entry(2, s, sizeof(s));
+}
+
+inline char* arch_cpu::get_interrupt_stack()
+{
+    return get_ist_entry(2);
 }
 
 inline void arch_cpu::init_on_cpu()

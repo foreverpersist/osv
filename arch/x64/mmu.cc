@@ -34,6 +34,8 @@ void page_fault(exception_frame *ef)
     {
         debug_early_u64("page_fault: ", addr);
         debug_early_u64("error_code: ", ef->get_error());
+        debug_early_u64("thread: ", reinterpret_cast<unsigned long long>(sched::thread::current()));
+        debug_early_u64("couter: ", sched::get_preempt_counter());
     }
     assert(sched::preemptable());
     assert(ef->rflags & processor::rflags_if);

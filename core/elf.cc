@@ -1052,12 +1052,14 @@ program::program(void* addr, bool kernel)
         _vmas = &mmu::vma_list;
         _vmas_mutex = &mmu::vma_list_mutex;
         _pt_root = mmu::get_root_pt(0);
+        _pt_mutex = &mmu::page_table_high_mutex;
     }
     else
     {
         _vmas = new mmu::vma_list_type(0x00000, 0x800000000000);
         _vmas_mutex = new rwlock_t();
         _pt_root = new mmu::pt_element<4>();
+        _pt_mutex = new mutex();
     }
     _core = std::make_shared<memory_image>(*this, (void*)ELF_IMAGE_START + PAGE_OFFSET);
     assert(_core->module_index() == core_module_index);
@@ -1123,12 +1125,13 @@ program::program(program *old)
     // Deep copy _loaded_objects_stack
     _loaded_objects_stack = old->_loaded_objects_stack;
     // Deep copy VMA (vma, anon_vma, file_vma, jvm_balloon_vma)
-    _vmas = new mmu::vma_list_type(0x00000, 0x400000000000);
+    _vmas = new mmu::vma_list_type(0x00000, 0x800000000000);
     _vmas_mutex = new rwlock_t();
     mmu::copy_vmas(_vmas, old->_vmas);
     // Copy PGT one by one, mark ptes of both parent and child cow
     // Writing PGT is atomic operation, so no mutex is needed
     _pt_root = new mmu::pt_element<4>();
+    _pt_mutex = new mutex();
     mmu::copy_page_table(_pt_root, old->_pt_root);
 }
 

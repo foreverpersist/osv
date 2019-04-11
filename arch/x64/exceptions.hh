@@ -35,6 +35,7 @@ struct user_frame {
     ulong rcx;
     ulong rbx;
     ulong rax;
+    ulong rsp;
     ulong rip;
 };
 

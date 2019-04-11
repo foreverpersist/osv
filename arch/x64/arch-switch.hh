@@ -76,6 +76,13 @@ void set_fsbase(u64 v) __attribute__((ifunc("resolve_set_fsbase")));
 
 void thread::switch_to()
 {
+    // Change to kernel stack
+    asm volatile
+        ("push %%rbp\n\t"
+         "mov %%rsp, %%rbp \n\t"
+         "mov %0, %%rsp \n\t"
+         :
+         : "r"(_detached_state->_cpu->arch.get_exception_stack()));
     thread* old = current();
     // writing to fs_base invalidates memory accesses, so surround with
     // barriers
@@ -110,6 +117,10 @@ void thread::switch_to()
            "r10", "r11", "r12", "r13", "r14", "r15", "memory");
     processor::fldcw(fpucw);
     processor::ldmxcsr(mxcsr);
+    // Restore to app stack
+    asm volatile
+        ("mov %%rbp, %%rsp \n\t"
+         "pop %%rbp \n\t" : :);
 }
 
 void thread::switch_to_first()

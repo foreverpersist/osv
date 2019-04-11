@@ -319,7 +319,8 @@ void general_protection(exception_frame* ef)
 
     dump_registers(ef);
 
-    abort("general protection fault\n");
+    abort("general protection fault: addr=%llx, rip=%llx, code=%llx, thread=%p\n", 
+        processor::read_cr2(), ef->rip, ef->get_error(), sched::thread::current());
 }
 
 #define DUMMY_HANDLER(x) \

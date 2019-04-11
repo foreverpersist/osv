@@ -594,6 +594,7 @@ public:
     rwlock_t *_vmas_mutex;
     // Private PGT
     mmu::pt_element<4> *_pt_root;
+    mutex *_pt_mutex;
 private:
     void add_debugger_obj(object* obj);
     void del_debugger_obj(object* obj);

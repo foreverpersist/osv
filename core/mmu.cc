@@ -1183,7 +1183,7 @@ inline bool in_vma_range(void* addr)
 void vpopulate(void* addr, size_t size)
 {
     assert(!in_vma_range(addr));
-    WITH_LOCK(page_table_high_mutex) {
+    WITH_LOCK(*elf::get_program()->_pt_mutex) {
         initialized_anonymous_page_provider map;
         operate_range(populate<>(&map, perm_rwx), addr, size);
     }
@@ -1192,7 +1192,7 @@ void vpopulate(void* addr, size_t size)
 void vdepopulate(void* addr, size_t size)
 {
     assert(!in_vma_range(addr));
-    WITH_LOCK(page_table_high_mutex) {
+    WITH_LOCK(*elf::get_program()->_pt_mutex) {
         initialized_anonymous_page_provider map;
         operate_range(unpopulate<>(&map), addr, size);
     }
@@ -1201,7 +1201,7 @@ void vdepopulate(void* addr, size_t size)
 void vcleanup(void* addr, size_t size)
 {
     assert(!in_vma_range(addr));
-    WITH_LOCK(page_table_high_mutex) {
+    WITH_LOCK(*elf::get_program()->_pt_mutex) {
         cleanup_intermediate_pages cleaner;
         operate_range(cleaner, addr, addr, size);
     }
@@ -1990,6 +1990,8 @@ std::string procfs_maps()
 
 void copy_vmas(vma_list_type *vmas, vma_list_type *old)
 {
+    WITH_LOCK(elf::get_program()->_vmas_mutex->for_read())
+    {
     for (auto& v: *old)
     {
         // auto type = typeid(v);
@@ -2012,6 +2014,7 @@ void copy_vmas(vma_list_type *vmas, vma_list_type *old)
             v.start(), v.end(), jv->balloon(), 
             v.perm(), v.flags()));
         }
+    }
     }
 }
 
@@ -2128,7 +2131,22 @@ void copy_pt(hw_ptep<0> parent, hw_ptep<0> old, uintptr_t start)
 
 void copy_page_table(pt_element<4> *pt, pt_element<4> *old)
 {
-    copy_pt(hw_ptep<4>::force(pt), hw_ptep<4>::force(old), 0);
+    sched::preempt_disable();
+    auto c = sched::thread::current()->get_cpu();
+    asm volatile
+        ("push %%rbp\n\t"
+         "mov %%rsp, %%rbp \n\t"
+         "mov %0, %%rsp \n\t"
+         :
+         : "r"(c->arch.get_exception_stack()));
+    WITH_LOCK(*elf::get_program()->_pt_mutex)
+    {
+        copy_pt(hw_ptep<4>::force(pt), hw_ptep<4>::force(old), 0);
+    }
+    asm volatile
+        ("mov %%rbp, %%rsp \n\t"
+         "pop %%rbp \n\t" : :);
+    sched::preempt_enable();
 }
 
 }

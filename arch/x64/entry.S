@@ -107,10 +107,12 @@ vfork:
     .cfi_offset %rip, 8
     .cfi_offset %rsp, 32
     push_regs_to_frame
+    push %rsp
     call do_vfork
 .global vfork_ret
 vfork_ret:
     pop_regs_from_frame
+    pop %rsp
     retq
     .cfi_endproc
 
@@ -122,11 +124,13 @@ fork:
     .cfi_def_cfa %rsp, 0
     .cfi_offset %rip, 8
     .cfi_offset %rsp, 32
+    push %rsp
     push_regs_to_frame
     call do_fork
 .global fork_ret
 fork_ret:
     pop_regs_from_frame
+    pop %rsp
     retq
     .cfi_endproc
 
