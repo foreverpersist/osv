@@ -50,8 +50,8 @@ void mutex::lock()
     // when another thread releases the lock.
     // Note "waiter" is on the stack, so we must not return before making sure
     // it was popped from waitqueue (by another thread or by us.)
-    wait_record waiter(current);
-    waitqueue.push(&waiter);
+    wait_record *waiter = new wait_record(current);
+    waitqueue.push(waiter);
 
     // The "Responsibility Hand-Off" protocol where a lock() picks from
     // a concurrent unlock() the responsibility of waking somebody up:
@@ -70,11 +70,11 @@ void mutex::lock()
                     // wake somebody up. Note that right after other->wake()
                     // below, waiter.thread() may become 0: the thread we woke
                     // can call unlock() and decide to wake us up.
-                    assert(waiter.thread());
+                    assert(waiter->thread());
                     other->wake();
                 } else {
                     // got the lock ourselves
-                    assert(other == &waiter);
+                    assert(other == waiter);
                     owner.store(current, std::memory_order_relaxed);
                     depth = 1;
                     return;
@@ -85,7 +85,7 @@ void mutex::lock()
 
     // Wait until another thread pops us from the wait queue and wakes us up.
     trace_mutex_lock_wait(this);
-    waiter.wait();
+    waiter->wait();
     trace_mutex_lock_wake(this);
     owner.store(current, std::memory_order_relaxed);
     depth = 1;

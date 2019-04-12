@@ -97,7 +97,6 @@ void thread::switch_to()
     auto mxcsr = processor::stmxcsr();
     if (_pt_root  != old->_pt_root)
     {
-        debug_early_u64("CHANGE PAGE TALBE to ", reinterpret_cast<unsigned long long >(_pt_root));
         processor::write_cr3(_pt_root->next_pt_addr());
     }
     asm volatile
