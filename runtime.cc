@@ -215,33 +215,43 @@ static void *vfork_trampoline(void *arg)
 extern "C" void do_vfork(user_frame *uf);
 void do_vfork(user_frame *uf)
 {
-    uf->rax = 0;
     vfork_frame child;
-    pthread_t t;
+    osv::shared_app_t app;
+    sched::thread *t;
 
     child.t = sched::thread::current();
     memcpy(&child.uf, uf, sizeof(user_frame));
-    pthread_create(&t, nullptr, vfork_trampoline, &child);
-    pthread_join(t, nullptr);
-    uf->rax = child.t->id();
+    child.uf.rax = 0;
+    app = osv::application::fork(osv::application::get_current(), 
+        vfork_trampoline, &child);
+    t = app->thread();
+    t->set_app_runtime(app.get());
+    t->start();
+    t->join();
+    uf->rax = t->id();
 }
 
 extern "C" void do_fork(user_frame *uf);
 void do_fork(user_frame *uf)
 {
     vfork_frame child;
-    osv::application *app;
+    osv::shared_app_t app;
     sched::thread *t;
 
     child.t = sched::thread::current();
     memcpy(&child.uf, uf, sizeof(user_frame));
     child.uf.rax = 0;
-    app = new osv::application(osv::application::get_current(), 
+    app = osv::application::fork(osv::application::get_current(), 
         vfork_trampoline, &child);
     t = app->thread();
-    t->set_app_runtime(app);
+    t->set_app_runtime(app.get());
     t->start();
     uf->rax = t->id();
+}
+
+int execve(const char *path, char *const argv[], char *const envp[])
+{
+    return osv::application::get_current()->execve(path, argv, envp);
 }
 
 pid_t setsid(void)

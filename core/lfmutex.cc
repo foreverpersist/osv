@@ -77,6 +77,7 @@ void mutex::lock()
                     assert(other == waiter);
                     owner.store(current, std::memory_order_relaxed);
                     depth = 1;
+                    delete waiter;
                     return;
                 }
             }
@@ -89,6 +90,7 @@ void mutex::lock()
     trace_mutex_lock_wake(this);
     owner.store(current, std::memory_order_relaxed);
     depth = 1;
+    delete waiter;
 }
 
 // send_lock() is used for implementing a "wait morphing" technique, where

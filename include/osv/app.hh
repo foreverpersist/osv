@@ -82,6 +82,8 @@ public:
      */
     static shared_app_t get_current();
 
+    static shared_app_t fork(shared_app_t old, void *(*start_routine) (void *), void *arg);
+
     /**
      * Start a new application.
      * args[0] should specify the command to run.
@@ -112,6 +114,8 @@ public:
     static void join_all() {
         apps.join();
     }
+
+    int execve(const char *path, char *const argv[], char *const envp[]);
 
     application(const std::string& command,
             const std::vector<std::string>& args,

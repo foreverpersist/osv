@@ -81,6 +81,8 @@ void thread::switch_to()
         ("push %%rbp\n\t"
          "mov %%rsp, %%rbp \n\t"
          "mov %0, %%rsp \n\t"
+         "push %%rbp \n\t"
+         "lea 8(%%rsp), %%rbp \n\t"
          :
          : "r"(_detached_state->_cpu->arch.get_exception_stack()));
     thread* old = current();
@@ -118,7 +120,8 @@ void thread::switch_to()
     processor::ldmxcsr(mxcsr);
     // Restore to app stack
     asm volatile
-        ("mov %%rbp, %%rsp \n\t"
+        ("pop %%rbp \n\t"
+         "mov %%rbp, %%rsp \n\t"
          "pop %%rbp \n\t" : :);
 }
 

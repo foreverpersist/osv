@@ -106,8 +106,8 @@ vfork:
     .cfi_def_cfa %rsp, 0
     .cfi_offset %rip, 8
     .cfi_offset %rsp, 32
-    push_regs_to_frame
     push %rsp
+    push_regs_to_frame
     call do_vfork
 .global vfork_ret
 vfork_ret:

@@ -19,15 +19,15 @@ int condvar::wait(mutex* user_mutex, sched::timer* tmr)
 {
     trace_condvar_wait(this);
     int ret = 0;
-    wait_record wr(sched::thread::current());
+    wait_record *wr = new wait_record(sched::thread::current());
 
     _m.lock();
     if (!_waiters_fifo.oldest) {
-        _waiters_fifo.oldest = &wr;
+        _waiters_fifo.oldest = wr;
     } else {
-        _waiters_fifo.newest->next = &wr;
+        _waiters_fifo.newest->next = wr;
     }
-    _waiters_fifo.newest = &wr;
+    _waiters_fifo.newest = wr;
     // Remember user_mutex for "wait morphing" feature. Assert our assumption
     // that concurrent waits use the same mutex.
     assert(!_user_mutex || _user_mutex == user_mutex);
@@ -40,20 +40,20 @@ int condvar::wait(mutex* user_mutex, sched::timer* tmr)
     sched::preempt_enable();
 
     // Wait until either the timer expires or condition variable signaled
-    wr.wait(tmr);
-    if (!wr.woken()) {
+    wr->wait(tmr);
+    if (!wr->woken()) {
         ret = ETIMEDOUT;
         // wr is still in the linked list (because of a timeout) so remove it:
         _m.lock();
-        if (&wr == _waiters_fifo.oldest) {
-            _waiters_fifo.oldest = wr.next;
-            if (!wr.next) {
+        if (wr == _waiters_fifo.oldest) {
+            _waiters_fifo.oldest = wr->next;
+            if (!wr->next) {
                 _waiters_fifo.newest = nullptr;
             }
         } else {
             wait_record *p = _waiters_fifo.oldest;
             while (p) {
-                if (&wr == p->next) {
+                if (wr == p->next) {
                     p->next = p->next->next;
                     if(!p->next) {
                         _waiters_fifo.newest = p;
@@ -72,11 +72,11 @@ int condvar::wait(mutex* user_mutex, sched::timer* tmr)
             // already done, or wake_all() has just taken the whole queue
             // and will wr.wake() soon. We can't return (and invalidate wr)
             // until it calls wr.wake().
-            wr.wait();
+            wr->wait();
         }
     }
 
-    if (wr.woken()) {
+    if (wr->woken()) {
         // Our wr was woken. The "wait morphing" protocol used by
         // condvar_wake*() ensures that this only happens after we got the
         // user_mutex for ourselves, so no need to mutex_lock() here.
@@ -85,6 +85,7 @@ int condvar::wait(mutex* user_mutex, sched::timer* tmr)
         user_mutex->lock();
     }
 
+    delete wr;
     return ret;
 }
 

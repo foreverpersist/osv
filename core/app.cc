@@ -118,6 +118,13 @@ bool application::unsafe_stop_and_abandon_other_threads()
     return success;
 }
 
+shared_app_t application::fork(shared_app_t old, void *(*start_routine) (void *), void *arg)
+{
+    auto app = std::make_shared<application>(old, start_routine, arg);
+    apps.push(app);
+    return app;
+}
+
 shared_app_t application::run(const std::vector<std::string>& args)
 {
     return run(args[0], args);
@@ -150,6 +157,53 @@ shared_app_t application::run_and_join(const std::string& command,
     app->start_and_join(setup_waiter);
     return app;
 }
+
+int application::execve(const char *path, char *const argv[], char *const envp[])
+{
+    // _program->remove_object(_lib.get());
+    _lib = _program->get_library(path);
+    if (!_lib)
+    {
+        errno = ENOENT;
+        return -1;
+    }
+    _main = _lib->lookup<int (int, char**)>("main");
+    if (!_main) {
+        _entry_point = reinterpret_cast<void(*)()>(_lib->entry_point());
+    }
+    if (!_entry_point && !_main) {
+        errno = ENOEXEC;
+        return -1;
+    }
+
+    _command = std::string(path);
+    _args.clear();
+    for (auto cur_arg = argv; cur_arg != nullptr && *cur_arg != nullptr && **cur_arg != '\0'; cur_arg++ ) {
+        _args.push_back(*cur_arg);
+    }
+    char * const *env_kv;
+    std::unordered_map<std::string, std::string> envp_map;
+    for (env_kv = envp; env_kv != nullptr && *env_kv != nullptr && **env_kv != '\0'; env_kv++ ) {
+        std::string key, value;
+        std::stringstream key_value(*env_kv);
+        std::getline(key_value, key, '=');
+        std::getline(key_value, value); /* value will be left unmodified if there is no = in key_value */
+        if (value == "") {
+            fprintf(stderr, "ENVIRON ignoring ill-formated variable %s (not key=value)\n", key.c_str());
+            continue;
+        }
+        envp_map[key] = value;
+    }
+
+    merge_in_environ(false, &envp_map);
+    prepare_argv(_program.get());
+
+    main();
+    sched::thread::exit();
+
+    return 0;
+}
+
 
 application::application(const std::string& command,
                      const std::vector<std::string>& args,
@@ -284,6 +338,12 @@ TRACEPOINT(trace_app_destroy, "app=%p", application*);
 application::~application()
 {
     debug_early_u64("~application _runtime.use_count ", _runtime.use_count());
+    if (_runtime.use_count() > 1)
+    {
+        _runtime.reset();
+        _termination_request_callbacks.clear();
+        _lib.reset();
+    }
     if(_runtime.use_count() == 1 || !_runtime)
     trace_app_destroy(this);
 }
