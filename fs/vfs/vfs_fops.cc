@@ -148,6 +148,11 @@ bool vfs_file::put_page(void *addr, uintptr_t off, mmu::hw_ptep<0> ptep)
     return pagecache::release(this, addr, off, ptep);
 }
 
+bool vfs_file::ref_page(uintptr_t off, mmu::hw_ptep<0> ptep, mmu::hw_ptep<0> old)
+{
+	return pagecache::ref(this, off, ptep, old);
+}
+
 void vfs_file::sync(off_t start, off_t end)
 {
     pagecache::sync(this, start, end);

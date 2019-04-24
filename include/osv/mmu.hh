@@ -147,6 +147,8 @@ public:
 
     virtual bool map_page(uintptr_t offset, hw_ptep<0> ptep, pt_element<0> pte, bool write, bool shared) override;
     virtual bool map_page(uintptr_t offset, hw_ptep<1> ptep, pt_element<1> pte, bool write, bool shared) override;
+    virtual bool ref_page(uintptr_t off, mmu::hw_ptep<0> ptep, mmu::hw_ptep<0> old);
+    virtual bool ref_page(uintptr_t off, mmu::hw_ptep<1> ptep, mmu::hw_ptep<1> old);
     virtual bool put_page(void *addr, uintptr_t offset, hw_ptep<0> ptep) override;
     virtual bool put_page(void *addr, uintptr_t offset, hw_ptep<1> ptep) override;
 };
@@ -348,6 +350,7 @@ void linear_unmap(void* virt, phys addr, size_t size,
                 mattr mem_attr = mmu::mattr_default);
 
 void free_initial_memory_range(uintptr_t addr, size_t size);
+void build_memory_use_map(u64 end);
 void switch_to_runtime_page_tables();
 
 void set_nr_page_sizes(unsigned nr);
@@ -364,9 +367,7 @@ std::string procfs_maps();
 
 unsigned long all_vmas_size();
 
-void copy_vmas(vma_list_type* vmas, vma_list_type *old);
-
-void copy_page_table(mmu::pt_element<4> *pt, mmu::pt_element<4> *old);
+void copy_vmas(vma_list_type* vmas, vma_list_type *old, pt_element<4> *pt, pt_element<4> *old_pt);
 
 }
 

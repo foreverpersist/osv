@@ -125,6 +125,13 @@ shared_app_t application::fork(shared_app_t old, void *(*start_routine) (void *)
     return app;
 }
 
+shared_app_t application::vfork(shared_app_t old, void *(*start_routine) (void *), void *arg)
+{
+    auto app = std::make_shared<application>(old, start_routine, arg);
+    apps.push(app);
+    return app;
+}
+
 shared_app_t application::run(const std::vector<std::string>& args)
 {
     return run(args[0], args);
@@ -161,17 +168,23 @@ shared_app_t application::run_and_join(const std::string& command,
 int application::execve(const char *path, char *const argv[], char *const envp[])
 {
     // _program->remove_object(_lib.get());
+    auto old_lib = _lib;
     _lib = _program->get_library(path);
     if (!_lib)
     {
+        _lib = old_lib;
         errno = ENOENT;
         return -1;
     }
+    auto old_main = _main;
+    auto old_entry_point = _entry_point;
     _main = _lib->lookup<int (int, char**)>("main");
     if (!_main) {
         _entry_point = reinterpret_cast<void(*)()>(_lib->entry_point());
     }
     if (!_entry_point && !_main) {
+        _main = old_main;
+        _entry_point = old_entry_point;
         errno = ENOEXEC;
         return -1;
     }

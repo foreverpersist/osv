@@ -216,6 +216,8 @@ void split_large_page(hw_ptep<1> ptep)
 struct page_allocator {
     virtual bool map(uintptr_t offset, hw_ptep<0> ptep, pt_element<0> pte, bool write) = 0;
     virtual bool map(uintptr_t offset, hw_ptep<1> ptep, pt_element<1> pte, bool write) = 0;
+    virtual bool ref(uintptr_t offset, hw_ptep<0> ptep, hw_ptep<0> old) = 0;
+    virtual bool ref(uintptr_t offset, hw_ptep<1> ptep, hw_ptep<1> old) = 0;
     virtual bool unmap(void *addr, uintptr_t offset, hw_ptep<0> ptep) = 0;
     virtual bool unmap(void *addr, uintptr_t offset, hw_ptep<1> ptep) = 0;
     virtual ~page_allocator() {}
@@ -1053,13 +1055,23 @@ private:
         if (!addr) {
             throw std::exception();
         }
-        if (write && pte.valid() && pte_is_cow(pte))
+        if (write && ptep.read().valid() && pte_is_cow(ptep.read()))
         {
-            debug_early_u64("Do COW for ", reinterpret_cast<unsigned long long>(addr));
-            // Copy memory content and set writable
-            memcpy(addr, phys_to_virt(pte.next_pt_addr()), size);
             pte.set_writable(true);
             pte.set_sw_bit(pte_cow, false);
+            auto page = phys_to_virt(pte.addr());
+            if (memory::get_page_ref(page) == 1)
+            {
+                ptep.write(pte);
+                if (pt_level_traits<N>::large_capable::value) {
+                memory::free_huge_page(addr, pt_level_traits<N>::size::value);
+                } else {
+                    memory::free_page(addr);
+                }
+                return true;
+            }
+            // Copy memory content and set writable
+            memcpy(addr, page, size);
             if (!write_pte(addr, ptep, pte))
             {
                 if (pt_level_traits<N>::large_capable::value) {
@@ -1088,13 +1100,29 @@ public:
         size_t size = pt_level_traits<1>::size::value;
         return set_pte(fill(memory::alloc_huge_page(size), offset, size), ptep, pte, write, size);
     }
+    virtual bool ref(uintptr_t offset, hw_ptep<0> ptep, hw_ptep<0> old) override {
+        auto pte = old.read();
+        pte = pte_mark_cow(pte, true);
+        old.write(pte);
+        ptep.write(pte);
+        return memory::set_page_ref(phys_to_virt(pte.addr()), true);
+    }
+    virtual bool ref(uintptr_t offset, hw_ptep<1> ptep,  hw_ptep<1> old) override {
+        auto pte = old.read();
+        pte = pte_mark_cow(pte, true);
+        old.write(pte);
+        ptep.write(pte);
+        return memory::set_huge_page_ref(phys_to_virt(pte.addr()), pt_level_traits<1>::size::value, true);
+    }
     virtual bool unmap(void *addr, uintptr_t offset, hw_ptep<0> ptep) override {
+        void *page = phys_to_virt(ptep.read().addr());
         clear_pte(ptep);
-        return true;
+        return memory::set_page_ref(page, false) == 0;
     }
     virtual bool unmap(void *addr, uintptr_t offset, hw_ptep<1> ptep) override {
+        void *page = phys_to_virt(ptep.read().addr());
         clear_pte(ptep);
-        return true;
+        return memory::set_huge_page_ref(page, pt_level_traits<1>::size::value, false) == 0;
     }
 };
 
@@ -1147,6 +1175,12 @@ public:
     }
     virtual bool map(uintptr_t offset, hw_ptep<1> ptep, pt_element<1> pte, bool write) override {
         return _file->map_page(offset + _foffset, ptep, pte, write, _shared);
+    }
+    virtual bool ref(uintptr_t offset, hw_ptep<0> ptep,  hw_ptep<0> old) override {
+        return _file->ref_page(offset + _foffset, ptep, old);
+    }
+    virtual bool ref(uintptr_t offset, hw_ptep<1> ptep,  hw_ptep<1> old) override {
+        return _file->ref_page(offset + _foffset, ptep, old);
     }
     virtual bool unmap(void *addr, uintptr_t offset, hw_ptep<0> ptep) override {
         return _file->put_page(addr, offset + _foffset, ptep);
@@ -1387,8 +1421,8 @@ void vm_fault(uintptr_t addr, exception_frame* ef)
     WITH_LOCK(prog->_vmas_mutex->for_read()) {
         auto vma = find_intersecting_vma(addr);
         if (vma == prog->_vmas->end() || access_fault(*vma, ef->get_error())) {
-            printf("vm_fault, empty[%d] addr[%llx] [error]%ld [rip]%llx thread[%llx] perm[%d]\n", 
-                vma == prog->_vmas->end(), addr, ef->get_error(), ef->rip, sched::thread::current(), vma->perm());
+            printf("vm_fault, empty[%d] addr[%llx] [error]%ld [rip]%llx thread[%s] perm[%d]\n", 
+                vma == prog->_vmas->end(), addr, ef->get_error(), ef->rip, sched::thread::current()->name().c_str(), vma->perm());
             vm_sigsegv(addr, ef);
             trace_mmu_vm_fault_sigsegv(addr, ef->get_error(), "slow");
             return;
@@ -1869,6 +1903,26 @@ bool shm_file::map_page(uintptr_t offset, hw_ptep<1> ptep, pt_element<1> pte, bo
     return write_pte(static_cast<char*>(page(hp_off)) + offset - hp_off, ptep, pte);
 }
 
+bool shm_file::ref_page(uintptr_t offset, hw_ptep<0> ptep, hw_ptep<0> old)
+{
+    auto pte = old.read();
+    pte = pte_mark_cow(pte, true);
+    old.write(pte);
+    ptep.write(pte);
+
+    return memory::set_huge_page_ref(phys_to_virt(pte.addr()), huge_page_size, true);
+}
+
+bool shm_file::ref_page(uintptr_t offset, hw_ptep<1> ptep, hw_ptep<1> old)
+{
+    auto pte = old.read();
+    pte = pte_mark_cow(pte, true);
+    old.write(pte);
+    ptep.write(pte);
+
+    return memory::set_huge_page_ref(phys_to_virt(pte.addr()), huge_page_size, true);
+}
+
 bool shm_file::put_page(void *addr, uintptr_t offset, hw_ptep<0> ptep) {return false;}
 bool shm_file::put_page(void *addr, uintptr_t offset, hw_ptep<1> ptep) {return false;}
 
@@ -1912,6 +1966,11 @@ void linear_unmap(void* _virt, phys addr, size_t size,
 void free_initial_memory_range(uintptr_t addr, size_t size)
 {
     memory::free_initial_memory_range(phys_cast<void>(addr), size);
+}
+
+void build_memory_use_map(u64 end)
+{
+    memory::build_memory_use_map(end);
 }
 
 error mprotect(const void *addr, size_t len, unsigned perm)
@@ -1988,38 +2047,10 @@ std::string procfs_maps()
     return os.str();
 }
 
-void copy_vmas(vma_list_type *vmas, vma_list_type *old)
-{
-    WITH_LOCK(elf::get_program()->_vmas_mutex->for_read())
-    {
-    for (auto& v: *old)
-    {
-        // auto type = typeid(v);
-        if (typeid(v) == typeid(mmu::anon_vma))
-        {
-            vmas->insert(*new anon_vma(addr_range(v.start(), v.end()), 
-                v.perm(), v.flags()));
-        }
-        else if (typeid(v) == typeid(mmu::file_vma))
-        {
-            file_vma *fv = reinterpret_cast<file_vma*>(&v);
-            vmas->insert(*new file_vma(addr_range(v.start(), v.end()),
-                v.perm(), v.flags(), fv->file(), 
-                fv->offset(), v.page_ops()));
-        }
-        else if (typeid(v) == typeid(mmu::jvm_balloon_vma))
-        {
-            jvm_balloon_vma *jv = reinterpret_cast<jvm_balloon_vma*>(&v); 
-            vmas->insert(*new jvm_balloon_vma(jv->jvm_addr(), 
-            v.start(), v.end(), jv->balloon(), 
-            v.perm(), v.flags()));
-        }
-    }
-    }
-}
-
 template<int N>
-void copy_pt(hw_ptep<N> parent, hw_ptep<N> old, uintptr_t start)
+void copy_page_range(hw_ptep<N> parent, hw_ptep<N> old, uintptr_t vma_start, 
+    uintptr_t start, uintptr_t end, uintptr_t base_virt, 
+    page_allocator *allocator)
 {
     assert(N > 0);
     // Define read()
@@ -2030,123 +2061,116 @@ void copy_pt(hw_ptep<N> parent, hw_ptep<N> old, uintptr_t start)
     // Define follow()
     auto pt = hw_ptep<N-1>::force(phys_cast<pt_element<N-1>>(parent.read().next_pt_addr()));
     auto old_pt = hw_ptep<N-1>::force(phys_cast<pt_element<N-1>>(old.read().next_pt_addr()));
-    auto num = pte_per_page;
     phys step = phys(1) << (page_size_shift + (N-1) * pte_per_page_shift);
-    void *addr;
-    size_t size;
+    auto idx = pt_index(start, N - 1);
+    auto eidx = pt_index(end, N - 1);
+    base_virt += idx * step;
+    base_virt = (int64_t(base_virt) << 16) >> 16;
 
-    if (N == 4)
-    {
-        // Use the same kernel page table: 0x800000000000~...
-        num = 1 << 8;
-    }
-
-    for (auto i = 0; i < num; i++)
+    do 
     {
         // Skip empty items
-        auto old_ptep = old_pt.at(i);
-        auto ptep = pt.at(i);
+        auto old_ptep = old_pt.at(idx);
+        auto ptep = pt.at(idx);
         auto pte = old_ptep.read();
         if (!pte.valid())
         {
-            start += step;
+            base_virt += step;
+            idx++;
             continue;
         }
-
-        if (unsigned(N) <= nr_page_sizes)
+        uintptr_t vstart = start, vend = end;
+        clamp(vstart, vend, base_virt, base_virt + step - 1, page_size);
+        if (N == 2)
         {
-            if (N == 2)
+            if (pte.large())
             {
-                if (pte.large())
+                // 2M pages
+                // Copy value and set COW
+                size_t size = pt_level_traits<1>::size::value;
+                if (start >= 0x400000000000ul && start < 0x420000000000ul)
                 {
-                    // 2M pages
-                    // Copy value and set COW
-                    if (pte.writable())
-                    {
-                        // pte.set_writable(false);
-                        // pte.set_sw_bit(pte_cow, true);
-                        // pte = pte_mark_cow(pte, true);
-                        // old_ptep.write(pte);
-                        // ptep.write(pte);
-
-                        size = pt_level_traits<1>::size::value;
-                        addr = memory::alloc_huge_page(size);
-                        memcpy(addr, phys_to_virt(pte.next_pt_addr()), size);
-                        if (!write_pte(addr, ptep, pte))
-                        {
-                            memory::free_huge_page(addr, size);
-                        }
-                    }
-                    else
-                    {
-                        ptep.write(pte);
-                    }
+                    // Copy stack
+                    auto addr = memory::alloc_huge_page(size);
+                    memcpy(addr, phys_to_virt(pte.addr()), size);
+                    write_pte(addr, ptep, pte);
                 }
                 else
                 {
-                    // Normal level 1 ptep
-                    copy_pt(ptep, old_ptep, start);
+                    pte = pte_mark_cow(pte, true);
+                    old_ptep.write(pte);
+                    ptep.write(pte);
+                    memory::set_huge_page_ref(phys_to_virt(pte.addr()), size, true);
                 }
             }
             else
             {
-                // 4K pages
-                // Copy value and set COW
-                if (pte.writable())
-                {
-                    // pte.set_writable(false);
-                    // pte.set_sw_bit(pte_cow, true);
-                    // pte = pte_mark_cow(pte, true);
-                    // old_ptep.write(pte);
-                    // ptep.write(pte);
-
-                    size = pt_level_traits<0>::size::value;
-                    addr = memory::alloc_page();
-                    memcpy(addr, phys_to_virt(pte.next_pt_addr()), size);
-                    if (!write_pte(addr, ptep, pte))
-                    {
-                        memory::free_page(addr);
-                    }
-                }
-                else
-                {
-                    ptep.write(pte);
-                }
+                // Normal level 1 ptep
+                copy_page_range(ptep, old_ptep, vma_start, vstart, vend, base_virt, allocator);
             }
         }
         else
         {
             // Normal level N-1 ptep
-            copy_pt(ptep, old_ptep, start);
+            copy_page_range(ptep, old_ptep, vma_start, vstart, vend, base_virt, allocator);
         }
-        start += step;
-    }
+        base_virt += step;
+        idx++;
+    } while (idx <= eidx);
 }
 
 template<>
-void copy_pt(hw_ptep<0> parent, hw_ptep<0> old, uintptr_t start)
+void copy_page_range(hw_ptep<0> parent, hw_ptep<0> old, uintptr_t vma_start, 
+    uintptr_t start, uintptr_t end, uintptr_t base_virt, 
+    page_allocator *allocator)
 {
-
+    if (start >= 0x400000000000ul && start < 0x420000000000ul)
+    {
+        // Copy stack
+        auto pte = old.read();
+        auto addr = memory::alloc_page();
+        memcpy(addr, phys_to_virt(pte.addr()), page_size);
+        write_pte(addr, parent, pte);
+    }
+    else if (!allocator->ref(base_virt - vma_start, parent, old))
+    {
+        debug("exception in pagecache when ref\n");
+    }
 }
 
-void copy_page_table(pt_element<4> *pt, pt_element<4> *old)
+void copy_vmas(vma_list_type *vmas, vma_list_type *old, pt_element<4> *pt, pt_element<4> *old_pt)
 {
-    sched::preempt_disable();
-    auto c = sched::thread::current()->get_cpu();
-    asm volatile
-        ("push %%rbp\n\t"
-         "mov %%rsp, %%rbp \n\t"
-         "mov %0, %%rsp \n\t"
-         :
-         : "r"(c->arch.get_exception_stack()));
-    WITH_LOCK(*elf::get_program()->_pt_mutex)
+    WITH_LOCK(elf::get_program()->_vmas_mutex->for_read())
     {
-        copy_pt(hw_ptep<4>::force(pt), hw_ptep<4>::force(old), 0);
+        hw_ptep<4> pt_root = hw_ptep<4>::force(pt);
+        hw_ptep<4> old_pt_root = hw_ptep<4>::force(old_pt);
+        for (auto& v: *old)
+        {
+            // auto type = typeid(v);
+            if (typeid(v) == typeid(mmu::anon_vma))
+            {
+                vmas->insert(*new anon_vma(addr_range(v.start(), v.end()), 
+                    v.perm(), v.flags()));
+            }
+            else if (typeid(v) == typeid(mmu::file_vma))
+            {
+                file_vma *fv = reinterpret_cast<file_vma*>(&v);
+                vma *n = fv->file()->mmap(addr_range(v.start(), v.end()), v.flags(), v.perm(), fv->offset()).release();
+                vmas->insert(*n);
+            }
+            else if (typeid(v) == typeid(mmu::jvm_balloon_vma))
+            {
+                jvm_balloon_vma *jv = reinterpret_cast<jvm_balloon_vma*>(&v); 
+                vmas->insert(*new jvm_balloon_vma(jv->jvm_addr(), 
+                    v.start(), v.end(), jv->balloon(), 
+                    v.perm(), v.flags()));
+            }
+            if (v.end() > v.start())
+            {
+                copy_page_range(pt_root, old_pt_root, v.start(), v.start(), v.end()-1, 0, v.page_ops());
+            }
+        }
     }
-    asm volatile
-        ("mov %%rbp, %%rsp \n\t"
-         "pop %%rbp \n\t" : :);
-    sched::preempt_enable();
 }
 
 }

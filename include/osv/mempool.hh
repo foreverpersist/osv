@@ -98,6 +98,7 @@ struct page_range {
 };
 
 void free_initial_memory_range(void* addr, size_t size);
+void build_memory_use_map(u64 end);
 void enable_debug_allocator();
 
 extern bool tracker_enabled;

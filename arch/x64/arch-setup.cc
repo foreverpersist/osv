@@ -204,6 +204,16 @@ void arch_setup_free_memory()
         }
         mmu::free_initial_memory_range(ent.addr, ent.size);
     });
+    u64 max_addr = 0;
+    auto p = e820_buffer;
+    while (p < e820_buffer + e820_size) {
+        auto ent = static_cast<e820ent*>(p);
+        if (ent->type == 1){
+            max_addr = std::max(max_addr, ent->addr + ent->size);
+        }
+        p += ent->ent_size + 4;
+    }
+    mmu::build_memory_use_map(max_addr);
 }
 
 void arch_setup_tls(void *tls, const elf::tls_data& info)

@@ -198,6 +198,10 @@ public:
         _vp = fp->f_dentry->d_vnode;
         vref(_vp);
     }
+    cached_page_write(hashkey key, vfs_file *fp, void *page) : cached_page(key, page) {
+        _vp = fp->f_dentry->d_vnode;
+        vref(_vp);
+    }
     ~cached_page_write() {
         if (_page) {
             if (_dirty) {
@@ -388,13 +392,37 @@ static int create_read_cached_page(vfs_file* fp, hashkey& key)
     return fp->get_arcbuf(&key, key.offset);
 }
 
-static std::unique_ptr<cached_page_write> create_write_cached_page(vfs_file* fp, hashkey& key)
+static std::unique_ptr<cached_page_write> create_write_cached_page(vfs_file* fp, hashkey& key, mmu::hw_ptep<0> ptep)
 {
     size_t bytes;
-    cached_page_write* cp = new cached_page_write(key, fp);
-    struct iovec iov {cp->addr(), mmu::page_size};
-
-    assert(sys_read(fp, &iov, 1, key.offset, &bytes) == 0);
+    void *addr;
+    cached_page_write* cp;
+    /* This method will be invoked, only when there is no write cache
+     * Maybe there is a read cache, private page, or none
+     *    private page    - do cow or reuse it when reference count is 1
+     *    read cache/none - create a new page filled with file
+     */
+    auto pte = ptep.read();
+    if (!pte.empty() && !find_in_cache(read_cache, key))
+    {
+        auto page = mmu::phys_to_virt(pte.addr());
+        if (memory::get_page_ref(page) == 1)
+        {
+            addr = page;
+        }
+        else
+        {
+            addr = memory::alloc_page();
+            memcpy(addr, page, mmu::page_size);
+        }
+    }
+    else
+    {
+        addr = memory::alloc_page();
+        struct iovec iov {addr, mmu::page_size};
+        assert(sys_read(fp, &iov, 1, key.offset, &bytes) == 0);
+    }
+    cp = new cached_page_write(key, fp, addr);
     return std::unique_ptr<cached_page_write>(cp);
 }
 
@@ -432,7 +460,7 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
 
     if (write) {
         if (!wcp) {
-            auto newcp = create_write_cached_page(fp, key);
+            auto newcp = create_write_cached_page(fp, key, ptep);
             if (shared) {
                 // write fault into shared mapping, there page is not in write cache yet, add it.
                 wcp = newcp.release();
@@ -489,6 +517,43 @@ bool get(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::pt_element<0> pt
     return mmu::write_pte(wcp->addr(), ptep, mmu::pte_mark_cow(pte, !shared));
 }
 
+bool ref(vfs_file* fp, off_t offset, mmu::hw_ptep<0> ptep, mmu::hw_ptep<0> old)
+{
+    struct stat st;
+    fp->stat(&st);
+    hashkey key {st.st_dev, st.st_ino, offset};
+    auto pte = old.read();
+    uint64_t addr = pte.addr();
+
+    if (pte.empty())
+        return false;
+    pte = mmu::pte_mark_cow(pte, true);
+    old.write(pte);
+    ptep.write(pte);
+    // page is either in ARC cache or write cache or zero page or private page
+
+    WITH_LOCK(write_lock) {
+        cached_page_write* wcp = find_in_cache(write_cache, key);
+
+        if (wcp && mmu::virt_to_phys(wcp->addr()) == addr) {
+            // page is in write cache
+            wcp->map(ptep);
+            return true;
+        }
+    }
+
+    WITH_LOCK(arc_lock) {
+        cached_page_arc* rcp = find_in_cache(read_cache, key);
+        if (rcp && mmu::virt_to_phys(rcp->addr()) == addr) {
+            // page is in ARC
+            add_read_mapping(rcp, ptep);
+            return true;
+        }
+    }
+
+    return memory::set_page_ref(mmu::phys_to_virt(addr), true);
+}
+
 bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
 {
     struct stat st;
@@ -523,7 +588,7 @@ bool release(vfs_file* fp, void *addr, off_t offset, mmu::hw_ptep<0> ptep)
     }
 
     // if a private page, caller will free it
-    return addr != zero_page;
+    return (addr != zero_page && memory::set_page_ref(addr, false) == 0);
 }
 
 void sync(vfs_file* fp, off_t start, off_t end)

@@ -657,6 +657,9 @@ private:
 page_range_allocator free_page_ranges
     __attribute__((init_priority((int)init_prio::fpranges)));
 
+mutex use_map_lock;
+unsigned char *use_map;
+
 template<typename T>
 T* page_range_allocator::bitmap_allocator<T>::allocate(size_t n)
 {
@@ -1450,6 +1453,12 @@ void* alloc_page()
 {
     void *p = untracked_alloc_page();
     tracker_remember(p, page_size);
+    if (use_map)
+    {
+        auto idx = reinterpret_cast<uintptr_t>(p);
+        idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
+        use_map[idx / page_size] = 1;
+    }
     return p;
 }
 
@@ -1466,6 +1475,11 @@ void free_page(void* v)
 {
     untracked_free_page(v);
     tracker_forget(v);
+    if (!use_map)
+        return;
+    auto idx = reinterpret_cast<uintptr_t>(v);
+    idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
+    use_map[idx / page_size] = 0;
 }
 
 /* Allocate a huge page of a given size N (which must be a power of two)
@@ -1477,6 +1491,18 @@ void* alloc_huge_page(size_t N)
 {
     WITH_LOCK(free_page_ranges_lock) {
         auto pr = free_page_ranges.alloc_aligned(N, 0, N, true);
+        if (use_map)
+        {
+            auto idx = reinterpret_cast<uintptr_t>(pr);
+            idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
+            auto start = idx / page_size;
+            auto num = N / page_size;
+            for (unsigned i = 0; i < num; i++)
+            {
+                use_map[start + i] = 1;
+            }
+        }
+
         if (pr) {
             on_alloc(N);
             return static_cast<void*>(pr);
@@ -1497,6 +1523,16 @@ void* alloc_huge_page(size_t N)
 void free_huge_page(void* v, size_t N)
 {
     free_page_range(v, N);
+    if (!use_map)
+        return;
+    auto idx = reinterpret_cast<uintptr_t>(v);
+    idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
+    auto start = idx / page_size;
+    auto num = N / page_size;
+    for (unsigned i = 0; i < num; i++)
+    {
+        use_map[start + i] = 0;
+    }
 }
 
 void free_initial_memory_range(void* addr, size_t size)
@@ -1526,6 +1562,52 @@ void free_initial_memory_range(void* addr, size_t size)
 
     auto pr = new (addr) page_range(size);
     free_page_ranges.initial_add(pr);
+}
+
+void build_memory_use_map(u64 end)
+{
+    size_t pages = (end + page_size - 1) / page_size;
+    use_map = (unsigned char*) free_page_ranges.alloc_aligned(pages, 0, pages, true);
+    memset(use_map, 0, pages);
+}
+
+unsigned set_page_ref(void *page, bool ref)
+{
+    auto idx = reinterpret_cast<uintptr_t>(page);
+    idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
+    WITH_LOCK(use_map_lock) {
+        if (ref)
+            use_map[idx / page_size]++;
+        else
+            use_map[idx / page_size]--;
+        return use_map[idx / page_size];
+    }
+}
+
+unsigned set_huge_page_ref(void *page, size_t bytes, bool ref)
+{
+    auto idx = reinterpret_cast<uintptr_t>(page);
+    idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
+    auto start = idx / page_size;
+    auto num = bytes / page_size;
+    WITH_LOCK(use_map_lock)
+    {
+        for (unsigned i = 0; i < num; i++)
+        {
+            if (ref)
+                use_map[start + i]++;
+            else
+                use_map[start + i]--;
+        }
+        return use_map[start];
+    }
+}
+
+unsigned get_page_ref(void *page)
+{
+    auto idx = reinterpret_cast<uintptr_t>(page);
+    idx -= reinterpret_cast<uintptr_t>(mmu::phys_mem);
+    return use_map[idx / page_size];
 }
 
 void  __attribute__((constructor(init_prio::mempool))) setup()

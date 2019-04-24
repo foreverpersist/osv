@@ -16,6 +16,9 @@ void* alloc_page();
 void free_page(void* page);
 void* alloc_huge_page(size_t bytes);
 void free_huge_page(void *page, size_t bytes);
+unsigned set_page_ref(void *page, bool ref = true);
+unsigned set_huge_page_ref(void *page, size_t bytes, bool ref = true);
+unsigned get_page_ref(void *page);
 
 }
 
