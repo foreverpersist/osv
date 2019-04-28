@@ -17,6 +17,7 @@
 #include <boost/range/algorithm/find.hpp>
 
 #include <bsd/sys/sys/queue.h>
+#include <osv/elf.hh>
 
 using namespace osv;
 
@@ -34,23 +35,25 @@ mutex_t gfdt_lock = MUTEX_INITIALIZER;
  */
 int _fdalloc(struct file *fp, int *newfd, int min_fd)
 {
+    rcu_ptr<file> *fdt = elf::get_program()->_gfdt;
+    mutex_t *fdt_lock = elf::get_program()->_gfdt_lock;
     int fd;
 
     fhold(fp);
 
     for (fd = min_fd; fd < FDMAX; fd++) {
-        if (gfdt[fd])
+        if (fdt[fd])
             continue;
 
-        WITH_LOCK(gfdt_lock) {
+        WITH_LOCK(*fdt_lock) {
             /* Now that we hold the lock,
              * make sure the entry is still available */
-            if (gfdt[fd].read_by_owner()) {
+            if (fdt[fd].read_by_owner()) {
                 continue;
             }
 
             /* Install */
-            gfdt[fd].assign(fp);
+            fdt[fd].assign(fp);
             *newfd = fd;
         }
 
@@ -79,16 +82,18 @@ int fdalloc(struct file *fp, int *newfd)
 
 int fdclose(int fd)
 {
+    rcu_ptr<file> *fdt = elf::get_program()->_gfdt;
+    mutex_t *fdt_lock = elf::get_program()->_gfdt_lock;
     struct file* fp;
 
-    WITH_LOCK(gfdt_lock) {
+    WITH_LOCK(*fdt_lock) {
 
-        fp = gfdt[fd].read_by_owner();
+        fp = fdt[fd].read_by_owner();
         if (fp == nullptr) {
             return EBADF;
         }
 
-        gfdt[fd].assign(nullptr);
+        fdt[fd].assign(nullptr);
     }
 
     fdrop(fp);
@@ -102,6 +107,8 @@ int fdclose(int fd)
  */
 int fdset(int fd, struct file *fp)
 {
+    rcu_ptr<file> *fdt = elf::get_program()->_gfdt;
+    mutex_t *fdt_lock = elf::get_program()->_gfdt_lock;
     struct file *orig;
 
     if (fd < 0 || fd >= FDMAX)
@@ -109,10 +116,10 @@ int fdset(int fd, struct file *fp)
 
     fhold(fp);
 
-    WITH_LOCK(gfdt_lock) {
-        orig = gfdt[fd].read_by_owner();
+    WITH_LOCK(*fdt_lock) {
+        orig = fdt[fd].read_by_owner();
         /* Install new file structure in place */
-        gfdt[fd].assign(fp);
+        fdt[fd].assign(fp);
     }
 
     if (orig)
@@ -139,13 +146,14 @@ static bool fhold_if_positive(file* f)
  */
 int fget(int fd, struct file **out_fp)
 {
+    rcu_ptr<file> *fdt = elf::get_program()->_gfdt;
     struct file *fp;
 
     if (fd < 0 || fd >= FDMAX)
         return EBADF;
 
     WITH_LOCK(rcu_read_lock) {
-        fp = gfdt[fd].read();
+        fp = fdt[fd].read();
         if (fp == nullptr) {
             return EBADF;
         }
@@ -211,6 +219,23 @@ int fdrop(struct file *fp)
     fp->close();
     rcu_dispose(fp);
     return 1;
+}
+
+void copy_fdt(rcu_ptr<file> *fdt, rcu_ptr<file> *old, mutex_t *old_lock)
+{
+    int fd;
+    struct file *fp;
+
+    for (fd = 0; fd < FDMAX; fd++) {
+        WITH_LOCK(*old_lock) {
+            /* Now that we hold the lock,
+             * make sure the entry is still available */
+            fp = old[fd].read_by_owner();
+            fdt[fd].assign(fp);
+        }
+        if (fp)
+            fhold(fp);
+    }
 }
 
 file::~file()

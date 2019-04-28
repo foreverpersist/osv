@@ -21,6 +21,8 @@
 
 #include <osv/mmu.hh>
 #include <osv/rwlock.h>
+#include <osv/rcu.hh>
+#include <libc/signal.hh>
 
 /// Marks a shared object as locked in memory and forces eager resolution of
 /// PLT entries so OSv APIs like preempt_disable() can be used
@@ -595,6 +597,11 @@ public:
     // Private PGT
     mmu::pt_element<4> *_pt_root;
     mutex *_pt_mutex;
+    // Private fdt
+    osv::rcu_ptr<::file> *_gfdt;
+    mutex_t *_gfdt_lock;
+    // Private signal handlers
+    struct sigaction *_signal_actions;
 private:
     void add_debugger_obj(object* obj);
     void del_debugger_obj(object* obj);

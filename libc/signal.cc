@@ -18,6 +18,7 @@
 #include <osv/clock.hh>
 #include <api/setjmp.h>
 #include <osv/stubbing.hh>
+#include <osv/elf.hh>
 
 using namespace osv::clock::literals;
 
@@ -114,6 +115,7 @@ void __attribute__((constructor)) signals_register_thread_notifier()
 
 void generate_signal(siginfo_t &siginfo, exception_frame* ef)
 {
+    struct sigaction *actions = elf::get_program()->_signal_actions;
     if (pthread_self() && thread_signals()->mask[siginfo.si_signo]) {
         // FIXME: need to find some other thread to deliver
         // FIXME: the signal to.
@@ -123,11 +125,11 @@ void generate_signal(siginfo_t &siginfo, exception_frame* ef)
         // needs to be running to generate them. So definitely not waiting.
         abort();
     }
-    if (is_sig_dfl(signal_actions[siginfo.si_signo])) {
+    if (is_sig_dfl(actions[siginfo.si_signo])) {
         // Our default is to abort the process
         abort();
-    } else if(!is_sig_ign(signal_actions[siginfo.si_signo])) {
-        arch::build_signal_frame(ef, siginfo, signal_actions[siginfo.si_signo]);
+    } else if(!is_sig_ign(actions[siginfo.si_signo])) {
+        arch::build_signal_frame(ef, siginfo, actions[siginfo.si_signo]);
     }
 }
 
@@ -137,6 +139,11 @@ void handle_mmap_fault(ulong addr, int sig, exception_frame* ef)
     si.si_signo = sig;
     si.si_addr = reinterpret_cast<void*>(addr);
     generate_signal(si, ef);
+}
+
+void copy_signals(struct sigaction *actions, struct sigaction *old)
+{
+    memcpy(actions, old, sizeof(struct sigaction) * nsignals);
 }
 
 }
@@ -217,16 +224,17 @@ UNIMPL(int sigsuspend(const sigset_t *mask));
 
 int sigaction(int signum, const struct sigaction* act, struct sigaction* oldact)
 {
+    struct sigaction *actions = elf::get_program()->_signal_actions;
     // FIXME: We do not support any sa_flags besides SA_SIGINFO.
     if (signum < 0 || signum >= (int)nsignals) {
         errno = EINVAL;
         return -1;
     }
     if (oldact) {
-        *oldact = signal_actions[signum];
+        *oldact = actions[signum];
     }
     if (act) {
-        signal_actions[signum] = *act;
+        actions[signum] = *act;
     }
     return 0;
 }
@@ -303,6 +311,7 @@ int sigwait(const sigset_t *set, int *sig)
 
 int kill(pid_t pid, int sig)
 {
+    struct sigaction *actions = elf::get_program()->_signal_actions;
     // OSv only implements one process, whose pid is getpid().
     // Sending a signal to pid 0 or -1 is also fine, as it will also send a
     // signal to the same single process.
@@ -319,12 +328,12 @@ int kill(pid_t pid, int sig)
         errno = EINVAL;
         return -1;
     }
-    if (is_sig_dfl(signal_actions[sig])) {
+    if (is_sig_dfl(actions[sig])) {
         // Our default is to power off.
         debug("Uncaught signal %d (\"%s\"). Powering off.\n",
                 sig, strsignal(sig));
         osv::poweroff();
-    } else if(!is_sig_ign(signal_actions[sig])) {
+    } else if(!is_sig_ign(actions[sig])) {
         if ((pid == 0) || (pid == -1)) {
             // That semantically means signalling everybody (or that, or the
             // user did getpid() and got 0, all the same. So we will signal
@@ -345,11 +354,11 @@ int kill(pid_t pid, int sig)
         // very Unix-like behavior, but if we assume that the program doesn't
         // care which of its threads handle the signal - why not just create
         // a completely new thread and run it there...
-        const auto sa = signal_actions[sig];
+        const auto sa = actions[sig];
         auto t = sched::thread::make([=] {
             if (sa.sa_flags & SA_RESETHAND) {
-                signal_actions[sig].sa_flags = 0;
-                signal_actions[sig].sa_handler = SIG_DFL;
+                actions[sig].sa_flags = 0;
+                actions[sig].sa_handler = SIG_DFL;
             }
             if (sa.sa_flags & SA_SIGINFO) {
                 // FIXME: proper second (siginfo) and third (context) arguments (See example in call_signal_handler)
@@ -465,6 +474,7 @@ int itimer::get(struct itimerval *curr_value)
  
 void itimer::work()
 {
+    struct sigaction *actions = elf::get_program()->_signal_actions;
     sched::timer tmr(*sched::thread::current());
     while (true) {
         WITH_LOCK(_mutex) {
@@ -479,7 +489,7 @@ void itimer::work()
                         _due = _no_alarm;
                     }
                     kill(0, _signum);
-                    if(!is_sig_ign(signal_actions[_signum])) {
+                    if(!is_sig_ign(actions[_signum])) {
                         _owner_thread->interrupted(true);
                     }
                 } else {

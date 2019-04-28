@@ -212,6 +212,8 @@ struct tty_file : public special_file {
         special_file(flags, type) { }
 };
 
+void copy_fdt(osv::rcu_ptr<file> *fdt, osv::rcu_ptr<file> *old, mutex_t *old_lock);
+
 #endif
 
 // f_count rules:

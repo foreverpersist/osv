@@ -29,6 +29,8 @@ sigset* thread_signals();
 
 void generate_signal(siginfo_t &siginfo, exception_frame* ef);
 void handle_mmap_fault(ulong addr, int sig, exception_frame* ef);
+
+void copy_signals(struct sigaction *actions, struct sigaction *old);
 }
 
 namespace arch {

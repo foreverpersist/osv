@@ -34,6 +34,10 @@ TRACEPOINT(trace_elf_unload, "%s", const char *);
 TRACEPOINT(trace_elf_lookup, "%s", const char *);
 TRACEPOINT(trace_elf_lookup_addr, "%p", const void *);
 
+extern osv::rcu_ptr<file> gfdt[];
+extern mutex_t gfdt_lock;
+static const unsigned nsignals = 65;
+
 using namespace boost::range;
 
 namespace {
@@ -1053,6 +1057,9 @@ program::program(void* addr, bool kernel)
         _vmas_mutex = &mmu::vma_list_mutex;
         _pt_root = mmu::get_root_pt(0);
         _pt_mutex = &mmu::page_table_high_mutex;
+        _gfdt = gfdt;
+        _gfdt_lock = &gfdt_lock;
+        _signal_actions = osv::signal_actions;
     }
     else
     {
@@ -1060,6 +1067,9 @@ program::program(void* addr, bool kernel)
         _vmas_mutex = new rwlock_t();
         _pt_root = new mmu::pt_element<4>();
         _pt_mutex = new mutex();
+        _gfdt = new osv::rcu_ptr<::file>[FDMAX] {};
+        _gfdt_lock = new mutex_t();
+        _signal_actions = new struct sigaction[nsignals] {};
     }
     _core = std::make_shared<memory_image>(*this, (void*)ELF_IMAGE_START + PAGE_OFFSET);
     assert(_core->module_index() == core_module_index);
@@ -1132,6 +1142,13 @@ program::program(program *old)
     _vmas = new mmu::vma_list_type(0x00000, 0x800000000000);
     _vmas_mutex = new rwlock_t();
     mmu::copy_vmas(_vmas, old->_vmas, _pt_root, old->_pt_root);
+    // Copy fdt
+    _gfdt = new osv::rcu_ptr<::file>[FDMAX] {};
+    _gfdt_lock = new mutex_t();
+    copy_fdt(_gfdt, old->_gfdt, old->_gfdt_lock);
+    // Copy signal handlers
+    _signal_actions = new struct sigaction[nsignals] {};
+    osv::copy_signals(_signal_actions, old->_signal_actions);
 }
 
 void program::set_search_path(std::initializer_list<std::string> path)
